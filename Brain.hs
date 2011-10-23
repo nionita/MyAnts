@@ -1,21 +1,24 @@
+{-# LANGUAGE RankNTypes #-}
+
 module Brain (doTurn) where
 
 import Data.Array
 import Data.List
 import Data.Maybe (mapMaybe)
-import Control.Monad.State
+-- import Control.Monad.State
 import System.IO
 import System.Random
 
+import StateT
 import Ants
 
 doTurn :: GameParams -> GameState -> IO [Order]
 doTurn gp gs = do
   -- generate orders for all ants belonging to me
   let initst = MyState { stPars = gp, stState = gs, stBusy = initBusy (world gs), stOrders = [] }
-  orders <- evalStateT (makeOrders $ myAnts $ ants gs) initst
-  elapsedTime <- timeRemaining gp gs
-  hPutStrLn stderr $ show elapsedTime
+  orders <- evalState (makeOrders $ myAnts $ ants gs) initst
+  restTime <- timeRemaining gp gs
+  hPutStrLn stderr $ "Time remaining (ms): " ++ show restTime
   -- wrap list of orders back into a monad
   return orders
 
@@ -26,7 +29,7 @@ data MyState = MyState {
          stOrders :: [Order]
      }
 
-type MyGame = StateT MyState IO
+type MyGame a = forall r. CPS r MyState IO a
 
 -- Array of point wher we cannot move
 type Busy = Array Point Bool

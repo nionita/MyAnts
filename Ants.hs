@@ -36,6 +36,7 @@ import Data.Maybe (fromJust, fromMaybe)
 import Control.Applicative
 import Data.Time.Clock
 import System.IO
+import System.Mem (performGC)
 
 -- type synonyms
 type Row = Int
@@ -224,6 +225,7 @@ finishTurn :: IO ()
 finishTurn = do
   putStrLn "go"
   hFlush stdout
+  performGC
 
 tuplify2 :: [a] -> (a,a)
 tuplify2 [x,y] = (x,y)
@@ -409,7 +411,7 @@ gameLoop gp gs doTurn = do
           let gsc = cleanState gs
           gsu <- updateGame gp gsc
           orders <- doTurn gp gsu
-          hPutStrLn stderr $ show orders
+          -- hPutStrLn stderr $ show orders
           mapM_ issueOrder orders
           finishTurn
           gameLoop gp gsu doTurn
