@@ -111,7 +111,7 @@ data Order = Order
   } deriving (Show)
 
 data GameState = GameState
-  { world :: World
+  { world :: !World
   , ants :: [Ant]
   , food :: [Food] -- call "food GameState" to return food list
   , startTime :: UTCTime
@@ -340,12 +340,11 @@ clearMetaTile m
 
 -- Clears ants and food and sets tiles to invisible
 cleanState :: GameState -> GameState
-cleanState gs = 
-  GameState {world = nw, ants = [], food = [], startTime = startTime gs}
-  where 
-    w = world gs
-    invisibles = map clearMetaTile $ elems w
-    nw = listArray (bounds w) invisibles
+cleanState gs = nw `seq` ngs
+  where ngs = GameState {world = nw, ants = [], food = [], startTime = startTime gs}
+        w = world gs
+        invisibles = map clearMetaTile $ elems w
+        nw = listArray (bounds w) invisibles
 
 -- timeRemaining :: GameParams -> GameState -> IO NominalDiffTime
 timeRemaining :: GameParams -> GameState -> IO Int
