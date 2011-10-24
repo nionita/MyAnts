@@ -2,43 +2,48 @@
 
 module Brain (doTurn) where
 
-import Data.Array
+import Control.Monad (filterM)
+import Data.Array.Unboxed
+import Data.Array.IO
 import Data.List
-import Data.Maybe (mapMaybe)
--- import Control.Monad.State
+import qualified Data.Map as M
+import Data.Maybe (maybe, fromMaybe)
 import System.IO
 import System.Random
 
 import StateT
 import Ants
 
-doTurn :: GameParams -> GameState -> IO [Order]
-doTurn gp gs = do
-  -- generate orders for all ants belonging to me
-  let initst = MyState { stPars = gp, stState = gs, stBusy = initBusy (world gs), stOrders = [] }
-  orders <- evalState (makeOrders $ myAnts $ ants gs) initst
-  restTime <- timeRemaining gp gs
-  hPutStrLn stderr $ "Time remaining (ms): " ++ show restTime
-  -- wrap list of orders back into a monad
-  return orders
-
 data MyState = MyState {
          stPars   :: GameParams,
          stState  :: GameState,
          stBusy   :: Busy,
+         stUpper  :: Point,
          stOrders :: [Order]
      }
 
 type MyGame a = forall r. CPS r MyState IO a
 
--- Array of point wher we cannot move
-type Busy = Array Point Bool
+-- Points where we cannot move
+type Busy = IOUArray Point Bool
 
 msReserve = 300 -- reserve time for answer back
 
-makeOrders :: [Ant] -> MyGame [Order]
+doTurn :: GameParams -> GameState -> IO ([Order], GameState)
+doTurn gp gs = do
+  busy <- initBusy gs
+  b <- getBounds $ water gs
+  let initst = MyState { stPars = gp, stState = gs, stBusy = busy,
+                         stUpper = snd b, stOrders = [] }
+  (orders, finst) <- runState (makeOrders $ ours gs) initst
+  restTime <- timeRemaining gp gs
+  hPutStrLn stderr $ "Time remaining (ms): " ++ show restTime
+  let gsf = (stState finst) { ants = [], ours = [] }
+  return (orders, gsf)
+
+makeOrders :: [Point] -> MyGame [Order]
 makeOrders [] = gets stOrders
-makeOrders ants = do
+makeOrders points = do
   st <- get
   let gp = stPars  st
       gs = stState st
@@ -46,44 +51,64 @@ makeOrders ants = do
   if tr <= msReserve
     then gets stOrders
     else do
-      perAnt $ head ants
-      makeOrders $ tail ants
+      perAnt $ head points
+      makeOrders $ tail points
 
-perAnt :: Ant -> MyGame ()
-perAnt a = do
+-- Combine the strategies for the move generation
+(<|>) :: MyGame Bool -> MyGame Bool -> MyGame Bool
+m1 <|> m2 = m1 >>= \r -> if r then return r else m2
+
+infixr 1 <|> 
+
+perAnt :: Point -> MyGame Bool
+perAnt pt = pickFood pt <|> moveRandom pt
+
+-- If we stay near a food square: wait one turn to pick it
+pickFood :: Point -> MyGame Bool
+pickFood pt = do
   st <- get
-  let neigh = neighbours w $ point a
-      avail = food . stState $ st
-      w = world . stState $ st
-  -- If we found food, take it (i.e. make a pause)
-  if nearFood w neigh
-     then return ()
-     else do
-       -- otherwise take one random from the acceptable ones
-       let acc = filter ((acceptable w (stBusy st)) a) allDirs
-       case acc of
-         []  -> return ()
-         [d] -> orderMove a d
-         _   -> do
-           r <- lift $ randomRIO (0, length acc - 1)
-           let d = acc !! r
-           orderMove a d
+  b <- lift $ getBounds (stBusy st)
+  if nearFood (snd b) (food . stState $ st) pt then return True else return False
 
-orderMove :: Ant -> Direction -> MyGame ()
-orderMove a d = do
-  w <- gets $ world . stState
-  let mvo = Order { ant = a, direction = d }
-  modify $ \s -> s { stBusy = actBusy w (stBusy s) a d, stOrders = mvo : stOrders s }
+{--
+gotoFood :: MyGame Bool
+gotoFood = do
+  st <- get
+  let 
+--}
 
-initBusy :: World -> Busy
-initBusy w = array (bounds w) $ map f $ assocs w
-  -- where f (i, mt) = (i, not $ tile mt `elem` [Dead, Water, Unknown])
-  where f (i, mt) = (i, not $ isLand mt)
+-- Take a random (but not bad) direction
+moveRandom :: Point -> MyGame Bool
+moveRandom pt = do
+  acc <- filterM (acceptableDirs pt) allDirs
+  case acc of
+    []  -> return False
+    [d] -> orderMove pt d
+    _   -> do
+      r <- liftIO $ randomRIO (0, length acc - 1)
+      let d = acc !! r
+      orderMove pt d
 
-actBusy :: World -> Busy -> Ant -> Direction -> Busy
-actBusy w b a d = b // [(i, True)]
-  where i = move w (point a) d
+orderMove :: Point -> Direction -> MyGame Bool
+orderMove p d = do
+    st <- get
+    let busy = stBusy st
+        u = stUpper st
+        mvo = Order { source = p, direction = d }
+        i = move u p d
+    liftIO $ writeArray busy i True
+    put st { stOrders = mvo : stOrders st }
+    return True
 
-acceptable :: World -> Busy -> Ant -> Direction -> Bool
-acceptable w busy a d = not $ busy ! i
-  where i = move w (point a) d
+-- Init bad/busy squares: just a copy of water
+initBusy :: GameState -> IO Busy
+initBusy gs = mapArray id (water gs)
+
+acceptableDirs :: Point -> Direction -> MyGame Bool
+acceptableDirs p d = do
+    st <- get
+    let busy = stBusy st
+        u = stUpper st
+        i = move u p d
+    b <- lift $ readArray busy i
+    return $! not b
