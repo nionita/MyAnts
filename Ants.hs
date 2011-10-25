@@ -98,7 +98,6 @@ data GameParams = GameParams
   , viewradius2 :: Int
   , attackradius2 :: Int
   , spawnradius2 :: Int
-  , viewPoints :: [Point]
   } deriving (Show)
 
 modDistance :: Int -> Int -> Int -> Int
@@ -251,9 +250,6 @@ createParams s =
       vr2 = lookup' "viewradius2"
       ar2 = lookup' "attackradius2"
       sr2 = lookup' "spawnradius2"
-      mx  = truncate $ sqrt $ fromIntegral vr2
-      vp' = (,) <$> [-mx..mx] <*> [-mx..mx]
-      vp  = filter (\p -> twoNormSquared p <= vr2) vp'
   in GameParams { loadtime      = lt
                 , turntime      = tt
                 , rows          = rs
@@ -262,7 +258,6 @@ createParams s =
                 , viewradius2   = vr2
                 , attackradius2 = ar2
                 , spawnradius2  = sr2
-                , viewPoints    = vp
                 }
 
 endGame :: IO ()

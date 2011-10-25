@@ -93,10 +93,10 @@ gotoFood pt = do
                  then return False
                  else do
                    let nx = nextTo u pt to
-                   lift $ hPutStrLn stderr
-                        $ "Ant " ++ show pt ++ " to food " ++ show to ++ " thru " ++ show nx
+                   -- lift $ hPutStrLn stderr
+                   --      $ "Ant " ++ show pt ++ " to food " ++ show to ++ " thru " ++ show nx
                    b <- isBusy nx
-                   when b $ lift $ hPutStrLn stderr $ "...but " ++ show nx ++ " is busy!"
+                   -- when b $ lift $ hPutStrLn stderr $ "...but " ++ show nx ++ " is busy!"
                    if b then return False
                         else orderMove pt (fromJust $ dirTo u pt nx)
 
