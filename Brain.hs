@@ -2,12 +2,12 @@
 
 module Brain (doTurn) where
 
-import Control.Monad (filterM)
+import Control.Monad (filterM, when)
 import Data.Array.Unboxed
 import Data.Array.IO
 import Data.List
-import qualified Data.Map as M
-import Data.Maybe (maybe, fromMaybe)
+-- import qualified Data.Map as M
+import Data.Maybe (fromJust)
 import System.IO
 import System.Random
 
@@ -38,7 +38,7 @@ doTurn gp gs = do
   (orders, finst) <- runState (makeOrders $ ours gs) initst
   restTime <- timeRemaining gp gs
   hPutStrLn stderr $ "Time remaining (ms): " ++ show restTime
-  let gsf = (stState finst) { ants = [], ours = [] }
+  let gsf = (stState finst) { ants = [], ours = [], foodP = [] }
   return (orders, gsf)
 
 makeOrders :: [Point] -> MyGame [Order]
@@ -61,7 +61,7 @@ m1 <|> m2 = m1 >>= \r -> if r then return r else m2
 infixr 1 <|> 
 
 perAnt :: Point -> MyGame Bool
-perAnt pt = pickFood pt <|> moveRandom pt
+perAnt pt = pickFood pt <|> gotoFood pt <|> moveRandom pt
 
 -- If we stay near a food square: wait one turn to pick it
 pickFood :: Point -> MyGame Bool
@@ -70,12 +70,35 @@ pickFood pt = do
   b <- lift $ getBounds (stBusy st)
   if nearFood (snd b) (food . stState $ st) pt then return True else return False
 
-{--
-gotoFood :: MyGame Bool
-gotoFood = do
+-- Go to some food, if easy reachable
+gotoFood :: Point -> MyGame Bool
+gotoFood pt = do
   st <- get
-  let 
---}
+  let gs = stState st
+      fo = foodP gs
+  if null fo
+     then return False
+     else do
+         -- take the nearest food
+         let u  = stUpper st
+             (to, x) = head $ sortByDist u pt fo
+             gp = stPars st
+         -- if it's not visible don't care
+         if x > viewradius2 gp
+            then return False
+            else do
+              -- am I the nearest ant to it?
+              let (fr, _) = head $ sortByDist u to (ours gs)
+              if fr /= pt
+                 then return False
+                 else do
+                   let nx = nextTo u pt to
+                   lift $ hPutStrLn stderr
+                        $ "Ant " ++ show pt ++ " to food " ++ show to ++ " thru " ++ show nx
+                   b <- isBusy nx
+                   when b $ lift $ hPutStrLn stderr $ "...but " ++ show nx ++ " is busy!"
+                   if b then return False
+                        else orderMove pt (fromJust $ dirTo u pt nx)
 
 -- Take a random (but not bad) direction
 moveRandom :: Point -> MyGame Bool
@@ -104,11 +127,16 @@ orderMove p d = do
 initBusy :: GameState -> IO Busy
 initBusy gs = mapArray id (water gs)
 
+isBusy :: Point -> MyGame Bool
+isBusy p = do
+    st <- get
+    let busy = stBusy st
+    lift $ readArray busy p
+
 acceptableDirs :: Point -> Direction -> MyGame Bool
 acceptableDirs p d = do
     st <- get
-    let busy = stBusy st
-        u = stUpper st
+    let u = stUpper st
         i = move u p d
-    b <- lift $ readArray busy i
+    b <- isBusy i
     return $! not b

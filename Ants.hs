@@ -12,6 +12,7 @@ module Ants
   , distance
   , timeRemaining
   , move
+  , sortByDist
 
     -- main function
   , game
@@ -21,15 +22,19 @@ module Ants
 
   , nearFood
   , allDirs
+  , nextTo
+  , dirTo
+
   ) where
 
+import Control.Applicative
 import Control.Monad (forM_)
 import Data.Array.IO
-import qualified Data.Set as S
-import Data.List (isPrefixOf, delete)
 import Data.Char (digitToInt, toUpper)
+import Data.List (isPrefixOf, delete, sortBy, lookup)
 import Data.Maybe (fromJust, fromMaybe)
-import Control.Applicative
+import Data.Ord (comparing)
+import qualified Data.Set as S
 import Data.Time.Clock
 import System.IO
 import System.Mem (performGC)
@@ -119,10 +124,10 @@ euclidSquare bound p1 p2 =
       cold = modDistance (col bound + 1) (col p1) (col p2)
   in (rowd ^ 2) + (cold ^ 2)
 
-distance :: GameParams -> Point -> Point -> Int
-distance gp l1 l2 =
-  let maxRow = rows gp - 1
-      maxCol = cols gp - 1
+distance :: Point -> Point -> Point -> Int
+distance bound l1 l2 =
+  let maxRow = row bound
+      maxCol = col bound
       rowDist = modDistance maxRow (row l1) (row l2)
       colDist = modDistance maxCol (col l1) (col l2)
   in rowDist + colDist
@@ -215,7 +220,7 @@ prepState gs = do
   forM_ (waterP gs) $ \i -> writeArray (water gs) i True
   let fo = S.fromList (foodP gs)
   time <- getCurrentTime
-  return gs { waterP = [], food = fo, foodP = [], startTime = time }
+  return gs { waterP = [], food = fo, startTime = time }
 
 -- timeRemaining :: GameParams -> GameState -> IO NominalDiffTime
 timeRemaining :: GameParams -> GameState -> IO Int
@@ -291,11 +296,24 @@ game :: (GameParams -> GameState -> IO ([Order], GameState)) -> IO ()
 game doTurn = do
   paramInput <- gatherParamInput
   let gp = createParams $ map (tuplify2 . words) paramInput
+  hPutStrLn stderr $ "Params:\n" ++ show gp
   gs <- initialGameState gp
   finishTurn -- signal done with setup
   gameLoop gp gs doTurn
 
 nearFood :: Point -> Food -> Point -> Bool
-nearFood u food p = any (flip S.member food . move u p) allDirs
+nearFood bound food p = any (flip S.member food . move bound p) allDirs
+
+nextTo :: Point -> Point -> Point -> Point
+nextTo bound from to = fst . head $ sortByDist bound to $ map (move bound from) allDirs
+
+-- Give a point and one of its neighbour points, get the direction to take to it
+-- (if possible)
+dirTo :: Point -> Point -> Point -> Maybe Direction
+dirTo bound from to = lookup to $ map (\d -> (move bound from d, d)) allDirs
+
+sortByDist :: Point -> Point -> [Point] -> [(Point, Int)]
+sortByDist bound from tos = sortBy (comparing snd)
+                                $ map (\to -> (to, distance bound from to)) tos
 
 -- vim: set expandtab:
