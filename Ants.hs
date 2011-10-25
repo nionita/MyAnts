@@ -23,7 +23,7 @@ module Ants
   , nearFood
   , allDirs
   , nextTo
-  , dirTo
+  , straightTo
 
   ) where
 
@@ -299,16 +299,21 @@ game doTurn = do
 nearFood :: Point -> Food -> Point -> Bool
 nearFood bound food p = any (flip S.member food . move bound p) allDirs
 
-nextTo :: Point -> Point -> Point -> Point
-nextTo bound from to = fst . head $ sortByDist bound to $ map (move bound from) allDirs
+-- Which direction to take to a given point? And which neighbour is on the way?
+nextTo :: Point -> Point -> Point -> (Direction, Point)
+nextTo bound from to = fst . head $ sortByDist snd bound to
+                                  $ map (\d -> (d, move bound from d)) allDirs
 
--- Give a point and one of its neighbour points, get the direction to take to it
--- (if possible)
-dirTo :: Point -> Point -> Point -> Maybe Direction
-dirTo bound from to = lookup to $ map (\d -> (move bound from d, d)) allDirs
+-- Find a straight way from one point to another
+straightTo :: Point -> Point -> Point -> [Point]
+straightTo bound from to
+  | from == to = []
+  | otherwise  = let (_, n) = nextTo bound from to
+                 in n : straightTo bound n to
 
-sortByDist :: Point -> Point -> [Point] -> [(Point, Int)]
-sortByDist bound from tos = sortBy (comparing snd)
-                                $ map (\to -> (to, distance bound from to)) tos
+-- Sort a list of <point+info> by distance to another point
+sortByDist :: (a -> Point) -> Point -> Point -> [a] -> [(a, Int)]
+sortByDist f bound from as = sortBy (comparing snd)
+                                $ map (\a -> (a, distance bound from (f a))) as
 
 -- vim: set expandtab:

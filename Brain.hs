@@ -29,6 +29,8 @@ type Busy = IOUArray Point Bool
 
 msReserve = 300 -- reserve time for answer back
 
+mobivisi = 2
+
 doTurn :: GameParams -> GameState -> IO ([Order], GameState)
 doTurn gp gs = do
   busy <- initBusy gs
@@ -81,24 +83,22 @@ gotoFood pt = do
      else do
          -- take the nearest food
          let u  = stUpper st
-             (to, x) = head $ sortByDist u pt fo
+             (to, x) = head $ sortByDist id u pt fo
              gp = stPars st
          -- if it's not visible don't care
-         if x > viewradius2 gp
+         if x > mobivisi * viewradius2 gp
             then return False
             else do
-              -- am I the nearest ant to it?
-              let (fr, _) = head $ sortByDist u to (ours gs)
-              if fr /= pt
+              -- can we go straight to it?
+              let path = straightTo u pt to
+              wat <- someWater path
+              if wat
                  then return False
                  else do
-                   let nx = nextTo u pt to
-                   -- lift $ hPutStrLn stderr
-                   --      $ "Ant " ++ show pt ++ " to food " ++ show to ++ " thru " ++ show nx
+                   let (d, nx) = nextTo u pt to
                    b <- isBusy nx
-                   -- when b $ lift $ hPutStrLn stderr $ "...but " ++ show nx ++ " is busy!"
                    if b then return False
-                        else orderMove pt (fromJust $ dirTo u pt nx)
+                        else orderMove pt d
 
 -- Take a random (but not bad) direction
 moveRandom :: Point -> MyGame Bool
@@ -140,3 +140,16 @@ acceptableDirs p d = do
         i = move u p d
     b <- isBusy i
     return $! not b
+
+someWater :: [Point] -> MyGame Bool
+someWater ps = do
+    w <- gets $ water . stState
+    lift $ waterGo w ps
+
+waterGo :: Water -> [Point] -> IO Bool
+waterGo w [] = return False
+waterGo w (a:as) = do
+    b <- readArray w a
+    if b
+       then return b
+       else waterGo w as
