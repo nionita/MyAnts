@@ -9,10 +9,10 @@ module Ants
   , Point
 
     -- Utility functions
-  , distance
   , timeRemaining
   , move
   , sortByDist
+  , inRadius2
 
     -- main function
   , game
@@ -81,8 +81,8 @@ data Order = Order
 data GameState = GameState
   { water  :: Water
   , waterP :: [Point]
-  , ants   :: [Point]
-  , ours   :: [Point]
+  , ours   :: [Point]   -- our ants
+  , ants   :: [Point]   -- other ants
   , foodP  :: [Point]
   , food   :: Food
   , hills  :: [Hill]
@@ -169,8 +169,9 @@ addHill gs h = gs { hills = nhills }
     where nhills = h : delete h (hills gs)
 
 addAnt :: GameState -> (Point, Int) -> GameState
-addAnt gs (p, i) = gs { ants = p : ants gs, ours = os }
-    where os = if i == 0 then p : ours gs else ours gs
+addAnt gs (p, i) = if i == 0
+                      then gs { ours = p : ours gs }
+                      else gs { ants = p : ants gs }
 
 -- Currently we ignore the dead ants
 addDead :: GameState -> Point -> GameState
@@ -315,5 +316,9 @@ straightTo bound from to
 sortByDist :: (a -> Point) -> Point -> Point -> [a] -> [(a, Int)]
 sortByDist f bound from as = sortBy (comparing snd)
                                 $ map (\a -> (a, distance bound from (f a))) as
+
+-- Find <point+info> in a given radius (squared)
+inRadius2 :: (a -> Point) -> Int -> Point -> Point -> [a] -> [a]
+inRadius2 f r bound from as = filter ((<=r) . distance bound from . f) as
 
 -- vim: set expandtab:
