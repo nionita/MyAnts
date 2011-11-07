@@ -2,7 +2,7 @@
 
 module Brain (doTurn) where
 
-import Control.Monad (filterM, when, forM_, liftM)
+import Control.Monad (filterM, when, forM_, liftM, liftM2, foldM)
 import Data.Array.Unboxed
 import Data.Array.IO
 import Data.List
@@ -33,6 +33,8 @@ foodRadius   = (1*) . const 100	-- in which we go to food
 homeRadius   = (1*) . const 100	-- in which we consider to be at home
 dangerRadius = (2*) . attackradius2	-- in which we are in danger
 kamikaRadius = (1*) . attackradius2	-- we try a one to one fight (as we die anyway)
+
+attMajority = 2	-- used when attacking many to many
 
 doTurn :: GameParams -> GameState -> IO ([Order], GameState)
 doTurn gp gs = do
@@ -69,29 +71,99 @@ perAnt :: Point -> MyGame Bool
 perAnt pt = danger pt
         <|> raze pt
         <|> pickFood pt
+        -- <|> gotoHill pt
         <|> gotoFood pt
         -- <|> toLuft pt
-        <|> moveRandom pt
+        <|> rest pt
 
-oneToOneAtHome = dangerAtHome
+rest pt = do
+    act <- choose [(1, maiRar pt), (2, moveRandom pt)]
+    act
 
-oneToOneAway _ _ = return True	-- just wait to see what happens
+-- When we fight to only one at home we have to be carefull
+toOneAtHome :: Point -> [Point] -> MyGame Bool
+toOneAtHome pt as = do
+    hz <- inHomeZone pt
+    case hz of
+      Nothing -> return False	-- not at home
+      Just h  -> do
+          os <- antsInZone True pt
+          case length os of
+            1 -> stayNearHome pt h
+            2 -> stayNearHome pt h
+            _ -> attackManyToOne pt os $ head as
+
+toOneAway :: Point -> [Point] -> MyGame Bool
+toOneAway pt as = do
+    os <- antsInZone True pt
+    case length os of
+      1 -> return False	-- be what it be
+      _ -> attackManyToOne pt os $ head as
+
+-- When we are at least 2 to 1:
+-- if we are the nearest: stay out of attack zone until at least one friend is at same distance
+-- if we are the second or third nearest: go to enemy
+-- if we are not one of the nearest 3, forget it
+attackManyToOne :: Point -> [Point] -> Point -> MyGame Bool
+attackManyToOne pt os en = do
+    st <- get
+    let u = stUpper st
+        as = take 3 $ sortByDist id u en (pt : os)
+    if length as == 2	-- can be only 2 or 3
+       then do
+           let [(fsp, fsx), (sep, sex)] = as
+           if pt /= fsp || fsx == sex
+              then gotoPoint pt en
+              else return True
+       else do
+           let [(fsp, fsx), (sep, sex), (thp, thx)] = as
+           if pt `elem` [fsp, sep, thp]
+              then if pt /= fsp || fsx == sex
+                      then gotoPoint pt en
+                      else return True
+              else return False
+
+attackManyToMany :: Point -> [Point] -> [Point] -> MyGame Bool
+attackManyToMany pt os as = do
+    let diff = length os + 1 - length as
+    if diff < attMajority
+       then moveFromList pt as
+       else if diff == attMajority
+            then moveRandom pt	-- or: wait a bit?
+            else moveToList pt as
+
+moveToList :: Point -> [Point] -> MyGame Bool
+moveToList pt as = do
+    let gc = gravCenter as
+    moveTo True pt gc
+
+moveFromList :: Point -> [Point] -> MyGame Bool
+moveFromList pt as = do
+    let gc = gravCenter as
+    moveTo False pt gc
+
+-- It must have at least one point!
+gravCenter :: [Point] -> Point
+gravCenter ps = (x `div` c, y `div` c)
+    where ((x, y), c) = foldl' f ((0, 0), 0) ps
+          f ((x, y), c) (xc, yc) = ((x + xc, y + yc), c + 1)
 
 -- When we face other ants, we have to take care!
 danger :: Point -> MyGame Bool
 danger pt = do
-    as <- antsInZone pt
+    as <- antsInZone False pt
     case length as of
       0 -> return False	-- no danger
-      1 -> oneToOneAtHome pt as <|> oneToOneAway pt as
-      _ -> dangerAtHome   pt as <|> dangerAway  pt as
+      1 -> toOneAtHome  pt as <|> toOneAway pt as
+      _ -> dangerAtHome pt as <|> dangerAway  pt as
 
 -- The enemy ants we have around us
-antsInZone :: Point -> MyGame [Point]
-antsInZone pt = do
+antsInZone :: Bool -> Point -> MyGame [Point]
+antsInZone friends pt = do
     st <- get
     let u = stUpper st
-        as = ants $ stState st
+        gs = stState st
+        as = if friends then ours gs else ants gs
         gp = stPars st
     return $! inRadius2 id (dangerRadius gp) u pt as
 
@@ -112,21 +184,32 @@ dangerAtHome pt as = do
     hz <- inHomeZone pt
     case hz of
       Nothing -> return False
-      Just h  -> if pt == h
-         then moveRandom pt	-- we stay on the hill: go away
-         else moveTo pt h	-- we get closer to home
+      Just h  -> stayNearHome pt h
 
-moveTo :: Point -> Point -> MyGame Bool
-moveTo pt to = do
+-- Keep close to home
+stayNearHome :: Point -> Point -> MyGame Bool
+stayNearHome pt h = if pt == h then moveRandom pt else moveTo True pt h
+
+-- Move to or from a point if the direction not busy (else wait)
+moveTo :: Bool -> Point -> Point -> MyGame Bool
+moveTo towards pt to = do
     st <- get
     let u = stUpper st
-        (d, n) = nextTo u pt to
+        (d, n) = if towards then nextTo u pt to else nextAw u pt to
     b <- isBusy n
     if b then return True
          else orderMove pt d
 
+-- If we are more: attack!
 dangerAway :: Point -> [Point] -> MyGame Bool
-dangerAway pt as = do	-- try to run away
+dangerAway pt as = do
+    os <- antsInZone True pt
+    case length os of
+      1 -> dangerAlone pt as
+      _ -> attackManyToMany pt os as
+
+dangerAlone :: Point -> [Point] -> MyGame Bool
+dangerAlone pt as = do
     st <- get
     let u = stUpper st
         gp = stPars st
@@ -140,13 +223,27 @@ dangerAway pt as = do	-- try to run away
 
 runAway pt as = moveRandom pt 	-- return True
 
-attackIt = moveTo
+attackIt = moveTo True
 
 attackOne _ _ = return True
 
 -- When we can raze something: do it!
 raze :: Point -> MyGame Bool
-raze pt = return False
+raze pt = do
+  st <- get
+  let gs = stState st
+      -- take the enemy hills
+      hi = map fst $ filter ((/= 0) . snd) $ hills gs
+  if null hi
+     then return False
+     else do
+         -- take the nearest hill
+         let u  = stUpper st
+             (h, x) = head $ sortByDist id u pt hi
+             gp = stPars st
+         if x > homeRadius gp
+            then return False	-- too far
+            else gotoPoint pt h
 
 -- If we stay near a food square: wait one turn to pick it
 pickFood :: Point -> MyGame Bool
@@ -164,24 +261,41 @@ gotoFood pt = do
   if null fo
      then return False
      else do
-         -- take the nearest food
+         -- take the nearest food in some radius
          let u  = stUpper st
+{--
              (to, x) = head $ sortByDist id u pt fo
              gp = stPars st
          -- if it's not visible don't care
          if x > foodRadius gp
             then return False
-            else do
-              -- can we go straight to it?
-              let path = straightTo u pt to
-              wat <- someWater path
-              if wat
-                 then return False
-                 else do
-                   let (d, nx) = nextTo u pt to
-                   b <- isBusy nx
-                   if b then return False
-                        else orderMove pt d
+            else gotoPoint pt to
+--}
+             gp = stPars st
+             foods = takeWhile ((<= foodRadius gp) . snd) $ sortByDist id u pt fo
+         takeFirst (gotoPoint pt) $ map fst foods
+         -- return False
+
+takeFirst :: (Point -> MyGame Bool) -> [Point] -> MyGame Bool
+takeFirst _ []     = return False
+takeFirst f (p:ps) = do
+    r <- f p
+    if r then return r else takeFirst f ps
+
+-- Go to a point if there is no water in between
+gotoPoint :: Point -> Point -> MyGame Bool
+gotoPoint pt to = do
+  u <- gets stUpper
+  -- can we go straight to it?
+  let path = straightTo u pt to
+  wat <- someWater $ map snd path
+  if wat
+     then return False	-- here we can do some variation - later
+     else do
+       let (d, nx) = head path
+       b <- isBusy nx
+       if b then return False
+            else orderMove pt d
 
 -- Take a random (but not bad) direction
 moveRandom :: Point -> MyGame Bool
@@ -233,6 +347,13 @@ toLuft pt = do
                    else return False		-- will go random
 --}
 
+maiRar :: Point -> MyGame Bool
+maiRar pt = do
+    os <- antsInZone True pt
+    if null os
+       then return False
+       else moveFromList pt os
+
 -- The list cannot be null!
 choose :: [(Int, a)] -> MyGame a
 choose ias = do
@@ -245,7 +366,7 @@ choose ias = do
           go r (a:as) = let i = fst a
                         in if r <= i then snd a else go (r - i) as
 
-orderMove :: Point -> Direction -> MyGame Bool
+orderMove :: Point -> Dir -> MyGame Bool
 orderMove p d = do
     st <- get
     let busy = stBusy st
@@ -276,7 +397,7 @@ filterBusy f as = do
     let busy = stBusy st
     lift $ filterM (\a -> liftM not $ readArray busy (f a)) as
 
-acceptableDirs :: Point -> Direction -> MyGame Bool
+acceptableDirs :: Point -> Dir -> MyGame Bool
 acceptableDirs p d = do
     st <- get
     let u = stUpper st

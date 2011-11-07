@@ -1,7 +1,7 @@
 module Ants
   (
     -- Data structures
-    Direction (..)
+    Dir (..)
   , GameParams (..)
   , GameState (..)
   , Order (..)
@@ -23,6 +23,7 @@ module Ants
   , nearFood
   , allDirs
   , nextTo
+  , nextAw
   , straightTo
 
   ) where
@@ -62,11 +63,11 @@ row = fst
 col :: Point -> Col
 col = snd
 
-data Direction = North | East | South | West deriving (Bounded, Eq, Enum)
+data Dir = North | East | South | West deriving (Bounded, Eq, Enum)
 
 allDirs = [North .. West]
 
-instance Show Direction where
+instance Show Dir where
   show North = "N"
   show East  = "E"
   show South = "S"
@@ -75,7 +76,7 @@ instance Show Direction where
 -- Representation of an order
 data Order = Order
   { source :: Point
-  , direction :: Direction
+  , direction :: Dir
   } deriving (Show)
 
 data GameState = GameState
@@ -131,7 +132,7 @@ distance bound l1 l2 =
       colDist = modDistance maxCol (col l1) (col l2)
   in rowDist + colDist
 
-move :: Point -> Point -> Direction -> Point
+move :: Point -> Point -> Dir -> Point
 move u p dir
   | dir == North = u %!% (row p - 1, col p)
   | dir == South = u %!% (row p + 1, col p)
@@ -301,20 +302,30 @@ nearFood :: Point -> Food -> Point -> Bool
 nearFood bound food p = any (flip S.member food . move bound p) allDirs
 
 -- Which direction to take to a given point? And which neighbour is on the way?
-nextTo :: Point -> Point -> Point -> (Direction, Point)
+nextTo :: Point -> Point -> Point -> (Dir, Point)
 nextTo bound from to = fst . head $ sortByDist snd bound to
                                   $ map (\d -> (d, move bound from d)) allDirs
 
+-- Which direction to take away from given point? And which neighbour is on the way?
+nextAw :: Point -> Point -> Point -> (Dir, Point)
+nextAw bound from to = fst . head $ sortRevByDist snd bound to
+                                  $ map (\d -> (d, move bound from d)) allDirs
+
 -- Find a straight way from one point to another
-straightTo :: Point -> Point -> Point -> [Point]
+straightTo :: Point -> Point -> Point -> [(Dir, Point)]
 straightTo bound from to
   | from == to = []
-  | otherwise  = let (_, n) = nextTo bound from to
-                 in n : straightTo bound n to
+  | otherwise  = let dp = nextTo bound from to
+                 in dp : straightTo bound (snd dp) to
 
 -- Sort a list of <point+info> by distance to another point
 sortByDist :: (a -> Point) -> Point -> Point -> [a] -> [(a, Int)]
 sortByDist f bound from as = sortBy (comparing snd)
+                                $ map (\a -> (a, distance bound from (f a))) as
+
+-- Sort a list of <point+info> descending by distance to another point
+sortRevByDist :: (a -> Point) -> Point -> Point -> [a] -> [(a, Int)]
+sortRevByDist f bound from as = sortBy (comparing (negate . snd))
                                 $ map (\a -> (a, distance bound from (f a))) as
 
 -- Find <point+info> in a given radius (squared)
