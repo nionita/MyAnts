@@ -15,37 +15,53 @@ import StateT
 import Ants
 
 data MyState = MyState {
-         stPars   :: GameParams,
-         stState  :: GameState,
-         stBusy   :: Busy,
-         stUpper  :: Point,
-         stOrders :: [Order]
+         stPars    :: GameParams,
+         stState   :: GameState Persist,
+         stPersist :: Persist,
+         stBusy    :: BitMap,
+         stUpper   :: Point,
+         stOrders  :: [Order]
+     }
+
+data Persist = Persist {
+         peSeen :: BitMap
      }
 
 type MyGame a = forall r. CPS r MyState IO a
 
 -- Points where we cannot move
-type Busy = IOUArray Point Bool
+type BitMap = IOUArray Point Bool
 
 -- Some constants and constant-like definitions:
 msReserve = 200		-- reserve time for answer back (ms)
 foodRadius   = (1*) . const 100	-- in which we go to food
 homeRadius   = (1*) . const 100	-- in which we consider to be at home
+razeRadius   = (2*) . const 100	-- in which we consider to raze enemy hills
 dangerRadius = (2*) . attackradius2	-- in which we are in danger
 kamikaRadius = (1*) . attackradius2	-- we try a one to one fight (as we die anyway)
 
 attMajority = 2	-- used when attacking many to many
 
-doTurn :: GameParams -> GameState -> IO ([Order], GameState)
+doTurn :: GameParams -> GameState Persist -> IO ([Order], GameState Persist)
 doTurn gp gs = do
   busy <- initBusy gs
   b <- getBounds $ water gs
-  let initst = MyState { stPars = gp, stState = gs, stBusy = busy,
-                         stUpper = snd b, stOrders = [] }
+  -- get the persistent information (between turns)
+  npers <- case userState gs of
+               Just pers -> return pers
+               Nothing   -> do
+                   nseen <- newArray b False
+                   return $ Persist { peSeen = nseen }
+  updateSeen gs (peSeen npers)
+  let initst = MyState {
+                   stPars = gp, stState = gs, stBusy = busy,
+                   stPersist = npers, stUpper = snd b, stOrders = []
+               }
   (orders, finst) <- runState (makeOrders $ ours gs) initst
   restTime <- timeRemaining gp gs
   hPutStrLn stderr $ "Time remaining (ms): " ++ show restTime
-  let gsf = (stState finst) { ants = [], ours = [], foodP = [] }
+  -- let gsf = (stState finst) { ants = [], ours = [], foodP = [], userState = stPersist  }
+  let gsf = gs { ants = [], ours = [], foodP = [], userState = Just (stPersist finst) }
   return (orders, gsf)
 
 makeOrders :: [Point] -> MyGame [Order]
@@ -75,13 +91,15 @@ perAnt pt = danger pt
         <|> gotoFood pt
         -- <|> toLuft pt
         <|> rest pt
+        -- <|> wait pt
 
 rest pt = do
-    act <- choose [(1, maiRar pt), (2, moveRandom pt)]
+    act <- choose [(2, maiRar pt), (1, moveRandom pt)]
     act
 
 -- When we fight to only one at home we have to be carefull
 toOneAtHome :: Point -> [Point] -> MyGame Bool
+toOneAtHome _ []  = return False
 toOneAtHome pt as = do
     hz <- inHomeZone pt
     case hz of
@@ -94,6 +112,7 @@ toOneAtHome pt as = do
             _ -> attackManyToOne pt os $ head as
 
 toOneAway :: Point -> [Point] -> MyGame Bool
+toOneAway _ []  = return False
 toOneAway pt as = do
     os <- antsInZone True pt
     case length os of
@@ -174,17 +193,23 @@ inHomeZone pt = do
         gp = stPars st
         gs = stState st
         -- take my hills and sort them by distance
-        (h, x) = head $ sortByDist id u pt $ map fst $ filter ((== 0) . snd) $ hills gs
-    if x <= homeRadius gp
-       then return $ Just h
-       else return Nothing
+        hs = sortByDist id u pt $ map fst $ filter ((== 0) . snd) $ hills gs
+    if null hs
+       then return Nothing
+       else do
+          let (h, x) = head hs
+          if x <= homeRadius gp
+             then return $ Just h
+             else return Nothing
 
 dangerAtHome :: Point -> [Point] -> MyGame Bool
 dangerAtHome pt as = do
     hz <- inHomeZone pt
     case hz of
       Nothing -> return False
-      Just h  -> stayNearHome pt h
+      Just h  -> do
+          act <- choose [(1, stayNearHome pt h), (1, dangerAway pt as)]
+          act
 
 -- Keep close to home
 stayNearHome :: Point -> Point -> MyGame Bool
@@ -225,15 +250,16 @@ runAway pt as = moveRandom pt 	-- return True
 
 attackIt = moveTo True
 
-attackOne _ _ = return True
+attackOne pt _ = moveRandom pt
 
 -- When we can raze something: do it!
 raze :: Point -> MyGame Bool
 raze pt = do
   st <- get
   let gs = stState st
-      -- take the enemy hills
-      hi = map fst $ filter ((/= 0) . snd) $ hills gs
+  -- take the active enemy hills
+  hi <- filterM (liftM not . seenPoint) $ map fst $ filter ((/= 0) . snd) $ hills gs
+  --  hi = map fst $ filter ((/= 0) . snd) $ hills gs
   if null hi
      then return False
      else do
@@ -241,7 +267,7 @@ raze pt = do
          let u  = stUpper st
              (h, x) = head $ sortByDist id u pt hi
              gp = stPars st
-         if x > homeRadius gp
+         if x > razeRadius gp
             then return False	-- too far
             else gotoPoint pt h
 
@@ -263,18 +289,9 @@ gotoFood pt = do
      else do
          -- take the nearest food in some radius
          let u  = stUpper st
-{--
-             (to, x) = head $ sortByDist id u pt fo
-             gp = stPars st
-         -- if it's not visible don't care
-         if x > foodRadius gp
-            then return False
-            else gotoPoint pt to
---}
              gp = stPars st
              foods = takeWhile ((<= foodRadius gp) . snd) $ sortByDist id u pt fo
          takeFirst (gotoPoint pt) $ map fst foods
-         -- return False
 
 takeFirst :: (Point -> MyGame Bool) -> [Point] -> MyGame Bool
 takeFirst _ []     = return False
@@ -284,15 +301,19 @@ takeFirst f (p:ps) = do
 
 -- Go to a point if there is no water in between
 gotoPoint :: Point -> Point -> MyGame Bool
+gotoPoint pt to | pt == to = return False
 gotoPoint pt to = do
   u <- gets stUpper
   -- can we go straight to it?
-  let path = straightTo u pt to
-  wat <- someWater $ map snd path
-  if wat
-     then return False	-- here we can do some variation - later
+  let ns = map (move u pt) allDirs
+      -- paths = map (straightTo u pt) $ to : ns
+      paths = map (straightTo u pt) $ to : []
+  okpaths <- filterM (liftM not . someWater . map snd) paths
+  if null okpaths
+     then return False
      else do
-       let (d, nx) = head path
+       let path = head okpaths
+           (d, nx) = head path
        b <- isBusy nx
        if b then return False
             else orderMove pt d
@@ -305,7 +326,9 @@ moveRandom pt = do
     []  -> return False
     [d] -> orderMove pt d
     _   -> do
-      r <- liftIO $ randomRIO (0, length acc)
+      mustMove <- isBusy pt
+      let low = if mustMove then 1 else 0
+      r <- liftIO $ randomRIO (low, length acc)
       if r == 0
          then return True	-- means: wait
          else do
@@ -378,12 +401,23 @@ orderMove p d = do
     put st { stOrders = mvo : stOrders st }
     return True
 
+wait :: Point -> MyGame Bool
+wait p = do
+    busy <- gets stBusy
+    liftIO $ writeArray busy p True
+    return False
+
 -- Init bad/busy squares: just a copy of water
-initBusy :: GameState -> IO Busy
+-- plus the food and the current own ants
+initBusy :: GameState Persist -> IO BitMap
 initBusy gs = do
     busy <- mapArray id (water gs)
     forM_ (ours gs ++ foodP gs) $ \p -> writeArray busy p True
+    -- forM_ (foodP gs) $ \p -> writeArray busy p True
     return busy
+
+updateSeen :: GameState Persist -> BitMap -> IO ()
+updateSeen gs busy = forM_ (ours gs) $ \p -> writeArray busy p True
 
 isBusy :: Point -> MyGame Bool
 isBusy p = do
@@ -418,5 +452,11 @@ waterGo w (a:as) = do
        then return b
        else waterGo w as
 
+seenPoint :: Point -> MyGame Bool
+seenPoint p = do
+    seen <- gets (peSeen . stPersist)
+    lift $ readArray seen p
+
 debug :: String -> MyGame ()
-debug s = liftIO $ hPutStrLn stderr s
+-- debug s = liftIO $ hPutStrLn stderr s
+debug _ = return ()

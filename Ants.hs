@@ -79,7 +79,7 @@ data Order = Order
   , direction :: Dir
   } deriving (Show)
 
-data GameState = GameState
+data GameState a = GameState
   { water  :: Water
   , waterP :: [Point]
   , ours   :: [Point]   -- our ants
@@ -88,6 +88,7 @@ data GameState = GameState
   , food   :: Food
   , hills  :: [Hill]
   , startTime :: UTCTime
+  , userState :: Maybe a -- to keep user state
   }
 
 data GameParams = GameParams
@@ -159,34 +160,34 @@ tuplify2 (x:y:_) = (x, y)
 tuplify3 :: [Int] -> ((Int, Int), Int)
 tuplify3 (x:y:z:_) = ((x, y), z)
 
-addWater :: GameState -> Point -> GameState
+addWater :: GameState a -> Point -> GameState a
 addWater gs p = gs { waterP = p : waterP gs }
 
-addFood :: GameState -> Point -> GameState
+addFood :: GameState a -> Point -> GameState a
 addFood gs p = gs { foodP = p : foodP gs }
 
-addHill :: GameState -> (Point, Int) -> GameState
+addHill :: GameState a -> (Point, Int) -> GameState a
 addHill gs h = gs { hills = nhills }
     where nhills = h : delete h (hills gs)
 
-addAnt :: GameState -> (Point, Int) -> GameState
+addAnt :: GameState a -> (Point, Int) -> GameState a
 addAnt gs (p, i) = if i == 0
                       then gs { ours = p : ours gs }
                       else gs { ants = p : ants gs }
 
 -- Currently we ignore the dead ants
-addDead :: GameState -> Point -> GameState
+addDead :: GameState a -> Point -> GameState a
 addDead gs _ = gs
 
-initialGameState :: GameParams -> IO GameState
+initialGameState :: GameParams -> IO (GameState a)
 initialGameState gp = do
   time <- getCurrentTime
   w <- newArray ((0, 0), (rows gp - 1, cols gp - 1)) False
-  let gs = GameState { water = w, waterP = [], ants = [], ours = [],
-                       food = S.empty, foodP = [], hills = [], startTime = time }
+  let gs = GameState { water = w, waterP = [], ants = [], ours = [], food = S.empty,
+                       foodP = [], hills = [], startTime = time, userState = Nothing }
   return gs
 
-updateGameState :: GameParams -> GameState -> String -> GameState
+updateGameState :: GameParams -> GameState a -> String -> GameState a
 updateGameState _  gs [] = gs
 updateGameState gp gs s
   | c == "w" = addWater gs $ toPoint ps
@@ -203,7 +204,7 @@ updateGameState gp gs s
     toPoiPl = tuplify3 . map read
 
 -- Reads input from the engine and stores in game state
-updateGame :: GameParams -> GameState -> IO GameState
+updateGame :: GameParams -> GameState a -> IO (GameState a)
 updateGame gp gs = do
   line <- getLine
   process line
@@ -216,7 +217,7 @@ updateGame gp gs = do
       | otherwise              = updateGame gp $ updateGameState gp gs line
 
 -- Prepares the game state after collecting the new input
-prepState :: GameState -> IO GameState
+prepState :: GameState a -> IO (GameState a)
 prepState gs = do
   forM_ (waterP gs) $ \i -> writeArray (water gs) i True
   let fo = S.fromList (foodP gs)
@@ -224,7 +225,7 @@ prepState gs = do
   return gs { waterP = [], food = fo, startTime = time }
 
 -- timeRemaining :: GameParams -> GameState -> IO NominalDiffTime
-timeRemaining :: GameParams -> GameState -> IO Int
+timeRemaining :: GameParams -> GameState a -> IO Int
 timeRemaining gp gs = do
   timeNow <- getCurrentTime
   let ms = turntime gp - round (1000 * (timeNow `diffUTCTime` startTime gs))
@@ -270,8 +271,8 @@ endGame = do
   hPutStrLn stderr $ "Final scores: " ++ unwords (tail $ words scores)
   -- TODO print 
 
-gameLoop :: GameParams -> GameState
-         -> (GameParams -> GameState -> IO ([Order], GameState))
+gameLoop :: GameParams -> GameState a
+         -> (GameParams -> GameState a -> IO ([Order], GameState a))
          -> IO ()
 gameLoop gp gs doTurn = do
   line <- getLine
@@ -289,7 +290,7 @@ gameLoop gp gs doTurn = do
       | "end" `isPrefixOf` line = endGame
       | otherwise = gameLoop gp gs doTurn -- ignore line
 
-game :: (GameParams -> GameState -> IO ([Order], GameState)) -> IO ()
+game :: (GameParams -> GameState a -> IO ([Order], GameState a)) -> IO ()
 game doTurn = do
   paramInput <- gatherParamInput
   let gp = createParams $ map (tuplify2 . words) paramInput
