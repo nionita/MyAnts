@@ -14,17 +14,21 @@ import System.Random
 import StateT
 import Ants
 
+-- Data structure for internal state
 data MyState = MyState {
-         stPars    :: GameParams,
-         stState   :: GameState Persist,
-         stPersist :: Persist,
-         stBusy    :: BitMap,
-         stUpper   :: Point,
-         stOrders  :: [Order]
+         stPars    :: GameParams,		-- game params
+         stState   :: GameState Persist,	-- game state (extern)
+         stPersist :: Persist,			-- persistent internal state
+         stBusy    :: BitMap,			-- busy fields
+         stUpper   :: Point,			-- upper bound of the world
+         stOrders  :: [Order],			-- accumulates orders
+         stOurCnt  :: Int,			-- total count of our ants
+         stWeakEH  :: [(Point, (Int, Int))]	-- weakness of enemy hills
      }
 
 data Persist = Persist {
-         peSeen :: BitMap
+         peSeen    :: BitMap,	-- fields where we were
+         peEnHills :: [Point]	-- enemy hills (not razed by us)
      }
 
 type MyGame a = forall r. CPS r MyState IO a
@@ -51,11 +55,18 @@ doTurn gp gs = do
                Just pers -> return pers
                Nothing   -> do
                    nseen <- newArray b False
-                   return $ Persist { peSeen = nseen }
+                   return $ Persist { peSeen = nseen, peEnHills = [] }
   updateSeen gs (peSeen npers)
-  let initst = MyState {
+  -- these are enemy hills we see this turn
+  let hinow = map fst $ filter ((/= 0) . snd) $ hills gs
+  -- take only the active ones (actually not razed by us)
+  hi <- filterM (liftM not . readArray (peSeen npers)) $ nub $ hinow ++ peEnHills npers
+  let attacs = map (hillAttacs (snd b) (razeRadius gp) (homeRadius gp) (ours gs) (ants gs)) hi
+      initst = MyState {
                    stPars = gp, stState = gs, stBusy = busy,
-                   stPersist = npers, stUpper = snd b, stOrders = []
+                   stPersist = npers { peEnHills = hi },
+                   stUpper = snd b, stOrders = [], stOurCnt = length (ours gs),
+                   stWeakEH = attacs
                }
   (orders, finst) <- runState (makeOrders $ ours gs) initst
   restTime <- timeRemaining gp gs
@@ -63,6 +74,12 @@ doTurn gp gs = do
   -- let gsf = (stState finst) { ants = [], ours = [], foodP = [], userState = stPersist  }
   let gsf = gs { ants = [], ours = [], foodP = [], userState = Just (stPersist finst) }
   return (orders, gsf)
+
+-- Attacs and defences of enemy hills: how many ants of us and of them are there?
+hillAttacs :: Point -> Int -> Int -> [Point] -> [Point] -> Point -> (Point, (Int, Int))
+hillAttacs bound rr hr os as h = (h, (us, them))
+    where us   = length $ inRadius2 id rr bound h os
+          them = length $ inRadius2 id hr bound h as
 
 makeOrders :: [Point] -> MyGame [Order]
 makeOrders [] = gets stOrders
@@ -84,17 +101,16 @@ m1 <|> m2 = m1 >>= \r -> if r then return r else m2
 infixr 1 <|> 
 
 perAnt :: Point -> MyGame Bool
-perAnt pt = danger pt
-        <|> raze pt
+perAnt pt = immRaze pt
+        <|> danger pt
         <|> pickFood pt
-        -- <|> gotoHill pt
+        <|> razeAttac pt
         <|> gotoFood pt
-        -- <|> toLuft pt
+        -- <|> explore pt
         <|> rest pt
-        -- <|> wait pt
 
 rest pt = do
-    act <- choose [(2, maiRar pt), (1, moveRandom pt)]
+    act <- choose [(3, maiRar pt), (2, explore pt), (1, moveRandom pt)]
     act
 
 -- When we fight to only one at home we have to be carefull
@@ -252,24 +268,55 @@ attackIt = moveTo True
 
 attackOne pt _ = moveRandom pt
 
--- When we can raze something: do it!
-raze :: Point -> MyGame Bool
-raze pt = do
+-- When we can raze some hill not defended: do it!
+immRaze :: Point -> MyGame Bool
+immRaze pt = do
+    mhr <- hillToRaze pt
+    case mhr of
+        Nothing     -> return False
+        Just (h, x) -> do
+            st <- get
+            let bound = stUpper st
+                as = ants $ stState st
+            if null $ inRadius2 id x bound h as
+               then gotoPoint pt h
+               else return False
+
+hillToRaze :: Point -> MyGame (Maybe (Point, Int))
+hillToRaze pt = do
   st <- get
   let gs = stState st
-  -- take the active enemy hills
-  hi <- filterM (liftM not . seenPoint) $ map fst $ filter ((/= 0) . snd) $ hills gs
-  --  hi = map fst $ filter ((/= 0) . snd) $ hills gs
+      -- take the active enemy hills
+      hi = peEnHills $ stPersist st
   if null hi
-     then return False
+     then return Nothing
      else do
          -- take the nearest hill
          let u  = stUpper st
              (h, x) = head $ sortByDist id u pt hi
              gp = stPars st
          if x > razeRadius gp
-            then return False	-- too far
-            else gotoPoint pt h
+            then return Nothing	-- too far
+            else return $ Just (h, x)
+
+razeAttac :: Point -> MyGame Bool
+razeAttac pt = do
+    mhr <- hillToRaze pt
+    case mhr of
+        Nothing     -> return False
+        Just (h, x) -> do
+            st <- get
+            case lookup h (stWeakEH st) of
+                Nothing         -> return False
+                Just (us, them) -> do
+                    let (attac, retra) = attacProbs us them (stOurCnt st)
+                    act <- choose [(attac, gotoPoint pt h), (retra, return False)]
+                    act
+
+attacProbs :: Int -> Int -> Int -> (Int, Int)
+attacProbs us them ours = (us * us * ours `div` afact, them * them * dfact `div` ours)
+    where afact = 20
+          dfact = 20
 
 -- If we stay near a food square: wait one turn to pick it
 pickFood :: Point -> MyGame Bool
@@ -376,6 +423,22 @@ maiRar pt = do
     if null os
        then return False
        else moveFromList pt os
+
+explore :: Point -> MyGame Bool
+explore pt = do
+  acc <- filterM (acceptableDirs pt) allDirs
+  case acc of
+    []  -> return False
+    [d] -> orderMove pt d
+    _   -> do
+        st <- get
+        let u = stUpper st
+            dn = map (\d -> (d, move u pt d)) acc
+        go dn
+    where go [] = return False
+          go ((d, n) : ds) = do
+             se <- seenPoint n
+             if se then go ds else orderMove pt d 
 
 -- The list cannot be null!
 choose :: [(Int, a)] -> MyGame a
