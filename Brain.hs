@@ -3,9 +3,11 @@
 module Brain (doTurn) where
 
 import Control.Monad (filterM, when, forM_, liftM, liftM2, foldM)
+import qualified Control.OldException as E
 import Data.Array.Unboxed
 import Data.Array.IO
 import Data.List
+import qualified Data.Map as M
 import Data.Maybe (fromJust)
 import Data.Ord (comparing)
 import System.IO
@@ -13,6 +15,7 @@ import System.Random
 
 import StateT
 import Ants
+import AStar
 
 -- Data structure for internal state
 data MyState = MyState {
@@ -22,12 +25,14 @@ data MyState = MyState {
          stBusy    :: BitMap,			-- busy fields
          stUpper   :: Point,			-- upper bound of the world
          stOrders  :: [Order],			-- accumulates orders
+         stPlans   :: [(Point, Plan)],		-- accumulates plans
          stOurCnt  :: Int,			-- total count of our ants
          stWeakEH  :: [(Point, (Int, Int))]	-- weakness of enemy hills
      }
 
 data Persist = Persist {
          peSeen    :: BitMap,	-- fields where we were
+         pePlMemo  :: PlanMemo,	-- our plans
          peEnHills :: [Point]	-- enemy hills (not razed by us)
      }
 
@@ -35,6 +40,11 @@ type MyGame a = forall r. CPS r MyState IO a
 
 -- Points where we cannot move
 type BitMap = IOUArray Point Bool
+
+-- Plans we calculate and must remember: priority, target and path
+data Prio = Green | Yellow | Red deriving (Eq, Ord, Show)
+data Plan = Plan { plPrio :: Prio, plTarget :: Point, plPath :: [PathInfo] } deriving Show
+type PlanMemo = M.Map Point Plan
 
 -- Some constants and constant-like definitions:
 msReserve = 200		-- reserve time for answer back (ms)
@@ -56,7 +66,7 @@ doTurn gp gs = do
                Just pers -> return pers
                Nothing   -> do
                    nseen <- newArray b False
-                   return $ Persist { peSeen = nseen, peEnHills = [] }
+                   return $ Persist { peSeen = nseen, pePlMemo = M.empty, peEnHills = [] }
   updateSeen gs (peSeen npers)
   -- these are enemy hills we see this turn
   let hinow = map fst $ filter ((/= 0) . snd) $ hills gs
@@ -66,14 +76,19 @@ doTurn gp gs = do
       initst = MyState {
                    stPars = gp, stState = gs, stBusy = busy,
                    stPersist = npers { peEnHills = hi },
-                   stUpper = snd b, stOrders = [], stOurCnt = length (ours gs),
-                   stWeakEH = attacs
+                   stUpper = snd b, stOrders = [], stPlans = [],
+                   stOurCnt = length (ours gs), stWeakEH = attacs
                }
   (orders, finst) <- runState (makeOrders $ ours gs) initst
+  let plans = M.fromList $ stPlans finst
+      fpers = (stPersist finst) { pePlMemo = plans }
   restTime <- timeRemaining gp gs
+  -- hPutStrLn stderr $ "Orders: " ++ show (stOrders finst)
+  -- hPutStrLn stderr $ "Plans:"
+  -- mapM_ (hPutStrLn stderr . show) $ stPlans finst
   hPutStrLn stderr $ "Time remaining (ms): " ++ show restTime
   -- let gsf = (stState finst) { ants = [], ours = [], foodP = [], userState = stPersist  }
-  let gsf = gs { ants = [], ours = [], foodP = [], userState = Just (stPersist finst) }
+  let gsf = gs { ants = [], ours = [], foodP = [], userState = Just fpers }
   return (orders, gsf)
 
 -- Attacs and defences of enemy hills: how many ants of us and of them are there?
@@ -105,9 +120,9 @@ perAnt :: Point -> MyGame Bool
 perAnt pt = immRaze pt
         <|> danger pt
         <|> pickFood pt
+        <|> followPlan pt
         <|> razeAttac pt
         <|> gotoFood pt
-        -- <|> explore pt
         <|> rest pt
 
 rest pt = do
@@ -324,7 +339,28 @@ pickFood :: Point -> MyGame Bool
 pickFood pt = do
   st <- get
   b <- lift $ getBounds (stBusy st)
-  if nearFood (snd b) (food . stState $ st) pt then return True else return False
+  if nearFood (snd b) (food . stState $ st) pt
+     then replicatePlan pt
+     else return False
+
+getOldPlan :: Point -> MyGame (Maybe Plan)
+getOldPlan pt = do
+  plans <- gets (pePlMemo . stPersist)
+  return $ M.lookup pt plans
+
+-- This is used when, having a plan, we can pick food (so we must wait), and then
+-- we can continue later with the plan. So it's always returning True
+replicatePlan :: Point -> MyGame Bool
+replicatePlan pt = do
+  mplan <- getOldPlan pt
+  case mplan of
+      Nothing   -> return True
+      Just plan -> do
+          newPlan pt plan
+          return True
+
+newPlan :: Point -> Plan -> MyGame ()
+newPlan pt plan = modify $ \s -> s { stPlans = (pt, plan) : stPlans s }
 
 -- Go to some food, if easy reachable
 gotoFood :: Point -> MyGame Bool
@@ -351,6 +387,31 @@ takeFirst f (p:ps) = do
 gotoPoint :: Point -> Point -> MyGame Bool
 gotoPoint pt to | pt == to = return False
 gotoPoint pt to = do
+  st <- get
+  let w = water . stState $ st
+      u = stUpper st
+  -- liftIO $ hPutStr stderr $ "Path from " ++ show pt ++ " to " ++ show to ++ ": "
+  mpath <- liftIO $
+      E.catch (aStar (okNeighbours w u) (distance u to) pt (== to))
+              (\e -> do
+                  hPutStrLn stderr $ "Exception in aStar: " ++ show e
+                  return Nothing
+              )
+  case mpath of
+    Nothing -> do
+      -- liftIO $ hPutStrLn stderr "Nothing"
+      return False
+    Just path' -> do
+      let path = reverse path'
+      -- liftIO $ hPutStrLn stderr $ show path
+      let plan = Plan { plPrio = Green, plTarget = to, plPath = path }
+      executePlan pt plan
+
+okNeighbours :: Water -> Point -> Point -> IO [PathInfo]
+okNeighbours w u pt = notWater w $ map (\d -> (d, move u pt d)) allDirs
+
+{--
+gotoPoint pt to = do
   u <- gets stUpper
   -- can we go straight to it?
   let ns = map (move u pt) allDirs
@@ -365,6 +426,7 @@ gotoPoint pt to = do
        b <- isBusy nx
        if b then return False
             else orderMove pt d
+--}
 
 -- Take a random (but not bad) direction
 moveRandom :: Point -> MyGame Bool
@@ -465,11 +527,23 @@ orderMove p d = do
     put st { stOrders = mvo : stOrders st }
     return True
 
-wait :: Point -> MyGame Bool
-wait p = do
-    busy <- gets stBusy
-    liftIO $ writeArray busy p True
-    return False
+-- If we have a plan: execute it
+followPlan :: Point -> MyGame Bool
+followPlan pt = do
+    mplan <- getOldPlan pt
+    case mplan of
+        Nothing   -> return False	-- no plan
+        Just plan -> executePlan pt plan
+
+executePlan :: Point -> Plan -> MyGame Bool
+executePlan pt plan | null (plPath plan) = return False
+executePlan pt plan = do
+    let ((d, p) : path) = plPath plan
+    b <- isBusy p
+    if b then return False else do	-- here: if it's not water, we should wait
+       orderMove pt d
+       newPlan p plan { plPath = path }
+       return True
 
 -- Init bad/busy squares: just a copy of water
 -- plus the food and the current own ants
@@ -485,8 +559,7 @@ updateSeen gs busy = forM_ (ours gs) $ \p -> writeArray busy p True
 
 isBusy :: Point -> MyGame Bool
 isBusy p = do
-    st <- get
-    let busy = stBusy st
+    busy <- gets stBusy
     lift $ readArray busy p
 
 filterBusy :: (a -> Point) -> [a] -> MyGame [a]
@@ -515,6 +588,9 @@ waterGo w (a:as) = do
     if b
        then return b
        else waterGo w as
+
+notWater :: Water -> [(a, Point)] -> IO [(a, Point)]
+notWater w = filterM (liftM not . readArray w . snd)
 
 seenPoint :: Point -> MyGame Bool
 seenPoint p = do

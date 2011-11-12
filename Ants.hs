@@ -11,6 +11,7 @@ module Ants
     -- Utility functions
   , timeRemaining
   , move
+  , distance
   , sortByDist
   , inRadius2
 
@@ -33,7 +34,6 @@ import Control.Monad (forM_)
 import Data.Array.IO
 import qualified Data.ByteString.Char8 as B
 import Data.Char (digitToInt, toUpper)
--- import Data.List (isPrefixOf, delete, sortBy, lookup)
 import Data.List (delete, sortBy, lookup)
 import Data.Maybe (fromMaybe)
 import Data.Ord (comparing)
