@@ -41,7 +41,8 @@ msReserve = 200		-- reserve time for answer back (ms)
 foodRadius   = (1*) . const 100	-- in which we go to food
 homeRadius   = (1*) . const 100	-- in which we consider to be at home
 razeRadius   = (2*) . const 100	-- in which we consider to raze enemy hills
-dangerRadius = (2*) . attackradius2	-- in which we are in danger
+-- dangerRadius = (2*) . attackradius2	-- in which we are in danger
+dangerRadius = (1*) . attackradius2	-- in which we are in danger
 kamikaRadius = (1*) . attackradius2	-- we try a one to one fight (as we die anyway)
 
 attMajority = 2	-- used when attacking many to many

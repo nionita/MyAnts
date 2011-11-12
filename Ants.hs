@@ -31,9 +31,11 @@ module Ants
 import Control.Applicative
 import Control.Monad (forM_)
 import Data.Array.IO
+import qualified Data.ByteString.Char8 as B
 import Data.Char (digitToInt, toUpper)
-import Data.List (isPrefixOf, delete, sortBy, lookup)
-import Data.Maybe (fromJust, fromMaybe)
+-- import Data.List (isPrefixOf, delete, sortBy, lookup)
+import Data.List (delete, sortBy, lookup)
+import Data.Maybe (fromMaybe)
 import Data.Ord (comparing)
 import qualified Data.Set as S
 import Data.Time.Clock
@@ -187,34 +189,38 @@ initialGameState gp = do
                        foodP = [], hills = [], startTime = time, userState = Nothing }
   return gs
 
-updateGameState :: GameParams -> GameState a -> String -> GameState a
-updateGameState _  gs [] = gs
+updateGameState :: GameParams -> GameState a -> B.ByteString -> Either B.ByteString (GameState a)
+updateGameState _  gs s | B.null s = Right gs
 updateGameState gp gs s
-  | c == "w" = addWater gs $ toPoint ps
-  | c == "f" = addFood  gs $ toPoint ps
-  | c == "h" = addHill  gs $ toPoiPl ps
-  | c == "a" = addAnt   gs $ toPoiPl ps
-  | c == "d" = addDead  gs $ toPoint ps
-  | otherwise = gs -- ignore line
+  | c == B.pack "w" = Right $ addWater gs $ toPoint ps
+  | c == B.pack "f" = Right $ addFood  gs $ toPoint ps
+  | c == B.pack "h" = Right $ addHill  gs $ toPoiPl ps
+  | c == B.pack "a" = Right $ addAnt   gs $ toPoiPl ps
+  | c == B.pack "d" = Right $ addDead  gs $ toPoint ps
+  | otherwise = Left s -- wrong line
   where
-    (c : ps) = words s
-    toPoint :: [String] -> Point
-    toPoint = tuplify2 . map read
-    toPoiPl :: [String] -> (Point, Int)
-    toPoiPl = tuplify3 . map read
+    (c : ps) = B.words s
+    toPoint :: [B.ByteString] -> Point
+    toPoint = tuplify2 . map (read . B.unpack)
+    toPoiPl :: [B.ByteString] -> (Point, Int)
+    toPoiPl = tuplify3 . map (read . B.unpack)
 
 -- Reads input from the engine and stores in game state
 updateGame :: GameParams -> GameState a -> IO (GameState a)
 updateGame gp gs = do
-  line <- getLine
+  line <- B.getLine
   process line
   where 
     process line
       -- | "turn" `isPrefixOf` line = do
       --     -- hPutStrLn stderr line
       --     updateGame gp gs 
-      | "go" `isPrefixOf` line = prepState gs
-      | otherwise              = updateGame gp $ updateGameState gp gs line
+      | B.pack "go" `B.isPrefixOf` line = prepState gs
+      | otherwise              = case updateGameState gp gs line of
+                                    Right gs' -> updateGame gp gs'
+                                    Left  s   -> do
+                                        B.hPutStrLn stderr $ B.pack "Ignore: " `B.append` line
+                                        updateGame gp gs
 
 -- Prepares the game state after collecting the new input
 prepState :: GameState a -> IO (GameState a)
@@ -231,28 +237,27 @@ timeRemaining gp gs = do
   let ms = turntime gp - round (1000 * (timeNow `diffUTCTime` startTime gs))
   return ms
 
-gatherParamInput :: IO [String]
+gatherParamInput :: IO [B.ByteString]
 gatherParamInput = gatherInput' []
   where
-    gatherInput' :: [String] -> IO [String]
+    gatherInput' :: [B.ByteString] -> IO [B.ByteString]
     gatherInput' xs = do
-      line <- getLine
-      if "ready" /= line
+      line <- B.getLine
+      if B.pack "ready" /= line
         then gatherInput' (line:xs)
         else return xs
   
-createParams :: [(String, String)] -> GameParams
+createParams :: [(B.ByteString, B.ByteString)] -> GameParams
 createParams s =
-  -- let lookup' key = read $ fromJust $ lookup key s
-  let lookup' key = read $ fromMaybe "0" $ lookup key s
-      lt  = lookup' "loadtime"
-      tt  = lookup' "turntime"
-      rs  = lookup' "rows"
-      cs  = lookup' "cols"
-      ts  = lookup' "turns"
-      vr2 = lookup' "viewradius2"
-      ar2 = lookup' "attackradius2"
-      sr2 = lookup' "spawnradius2"
+  let lookup' key = read $ B.unpack $ fromMaybe (B.pack "0") $ lookup key s
+      lt  = lookup' $ B.pack "loadtime"
+      tt  = lookup' $ B.pack "turntime"
+      rs  = lookup' $ B.pack "rows"
+      cs  = lookup' $ B.pack "cols"
+      ts  = lookup' $ B.pack "turns"
+      vr2 = lookup' $ B.pack "viewradius2"
+      ar2 = lookup' $ B.pack "attackradius2"
+      sr2 = lookup' $ B.pack "spawnradius2"
   in GameParams { loadtime      = lt
                 , turntime      = tt
                 , rows          = rs
@@ -265,35 +270,38 @@ createParams s =
 
 endGame :: IO ()
 endGame = do
-  players <- getLine
-  hPutStrLn stderr $ "Number of players: " ++ (words players !! 1)
-  scores <- getLine
-  hPutStrLn stderr $ "Final scores: " ++ unwords (tail $ words scores)
+  hPutStrLn stderr "End of game reached"
+  -- players <- getLine
+  -- hPutStrLn stderr $ "Number of players: " ++ (words players !! 1)
+  -- scores <- getLine
+  -- hPutStrLn stderr $ "Final scores: " ++ unwords (tail $ words scores)
   -- TODO print 
 
 gameLoop :: GameParams -> GameState a
          -> (GameParams -> GameState a -> IO ([Order], GameState a))
          -> IO ()
 gameLoop gp gs doTurn = do
-  line <- getLine
+  line <- B.getLine
   gameLoop' line
   where
     gameLoop' line
-      | "turn" `isPrefixOf` line = do 
-          hPutStrLn stderr line
+      | B.pack "turn" `B.isPrefixOf` line = do 
+          B.hPutStrLn stderr line
           gs1 <- updateGame gp gs
           (orders, gs2) <- doTurn gp gs1
           -- hPutStrLn stderr $ show orders
           mapM_ issueOrder orders
           finishTurn
           gameLoop gp gs2 doTurn
-      | "end" `isPrefixOf` line = endGame
-      | otherwise = gameLoop gp gs doTurn -- ignore line
+      | B.pack "end" `B.isPrefixOf` line = endGame
+      | otherwise = do
+          B.hPutStrLn stderr $ B.pack "Input: " `B.append` line
+          gameLoop gp gs doTurn -- ignore line
 
 game :: (GameParams -> GameState a -> IO ([Order], GameState a)) -> IO ()
 game doTurn = do
   paramInput <- gatherParamInput
-  let gp = createParams $ map (tuplify2 . words) paramInput
+  let gp = createParams $ map (tuplify2 . B.words) paramInput
   hPutStrLn stderr $ "Params:\n" ++ show gp
   gs <- initialGameState gp
   finishTurn -- signal done with setup
