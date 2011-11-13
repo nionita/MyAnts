@@ -26,14 +26,16 @@ data MyState = MyState {
          stUpper   :: Point,			-- upper bound of the world
          stOrders  :: [Order],			-- accumulates orders
          stPlans   :: [(Point, Plan)],		-- accumulates plans
+         stWeakEH  :: [(Point, (Int, Int))],	-- weakness of enemy hills
          stOurCnt  :: Int,			-- total count of our ants
-         stWeakEH  :: [(Point, (Int, Int))]	-- weakness of enemy hills
+         stCrtASt  :: Int			-- current astar searches
      }
 
 data Persist = Persist {
          peSeen    :: BitMap,	-- fields where we were
          pePlMemo  :: PlanMemo,	-- our plans
-         peEnHills :: [Point]	-- enemy hills (not razed by us)
+         peEnHills :: [Point],	-- enemy hills (not razed by us)
+         peMaxPASt :: Int	-- maximum astar searches per turn
      }
 
 type MyGame a = forall r. CPS r MyState IO a
@@ -45,16 +47,16 @@ type PlanMemo = M.Map Point Plan
 
 -- Some constants and constant-like definitions:
 msReserve = 200		-- reserve time for answer back (ms)
+msDecrAst = 400		-- under this time we decrese the AStar seraches per turn
+msIncrAst = 700		-- over this time we increse the AStar seraches per turn
+maxMaxASt = 80	-- maximum AStar searches per turn
+attMajority = 2	-- used when attacking many to many
 foodRadius   = (1*) . const 100	-- in which we go to food
 homeRadius   = (1*) . const 100	-- in which we consider to be at home
 razeRadius   = (2*) . const 100	-- in which we consider to raze enemy hills
 -- dangerRadius = (2*) . attackradius2	-- in which we are in danger
 dangerRadius = (1*) . attackradius2	-- in which we are in danger
 kamikaRadius = (1*) . attackradius2	-- we try a one to one fight (as we die anyway)
-
-attMajority = 2	-- used when attacking many to many
-
-maxPLen = 40	-- maximum path length for AStar
 
 doTurn :: GameParams -> GameState Persist -> IO ([Order], GameState Persist)
 doTurn gp gs = do
@@ -65,7 +67,8 @@ doTurn gp gs = do
                Just pers -> return pers
                Nothing   -> do
                    nseen <- newArray b False
-                   return $ Persist { peSeen = nseen, pePlMemo = M.empty, peEnHills = [] }
+                   return $ Persist { peSeen = nseen, pePlMemo = M.empty,
+                                      peEnHills = [], peMaxPASt = maxMaxASt }
   updateSeen gs (peSeen npers)
   -- these are enemy hills we see this turn
   let hinow = map fst $ filter ((/= 0) . snd) $ hills gs
@@ -76,19 +79,28 @@ doTurn gp gs = do
                    stPars = gp, stState = gs, stBusy = busy,
                    stPersist = npers { peEnHills = hi },
                    stUpper = snd b, stOrders = [], stPlans = [],
-                   stOurCnt = length (ours gs), stWeakEH = attacs
+                   stOurCnt = length (ours gs), stWeakEH = attacs,
+                   stCrtASt = peMaxPASt npers
                }
   (orders, finst) <- runState (makeOrders $ ours gs) initst
-  let plans = M.fromList $ stPlans finst
-      fpers = (stPersist finst) { pePlMemo = plans }
   restTime <- timeRemaining gp gs
+  let plans = M.fromList $ stPlans finst
+      astpt = aStarNextTurn (peMaxPASt npers) restTime
+      fpers = (stPersist finst) { pePlMemo = plans, peMaxPASt = astpt }
   -- hPutStrLn stderr $ "Orders: " ++ show (stOrders finst)
   -- hPutStrLn stderr $ "Plans:"
   -- mapM_ (hPutStrLn stderr . show) $ stPlans finst
   hPutStrLn stderr $ "Time remaining (ms): " ++ show restTime
+  hPutStrLn stderr $ "Next aStar per turn: " ++ show astpt
   -- let gsf = (stState finst) { ants = [], ours = [], foodP = [], userState = stPersist  }
   let gsf = gs { ants = [], ours = [], foodP = [], userState = Just fpers }
   return (orders, gsf)
+
+aStarNextTurn :: Int -> Int -> Int
+aStarNextTurn prv tm
+    | tm <= msDecrAst = max 1 (prv `div` 2)	-- minimum 1
+    | tm >= msIncrAst = min maxMaxASt (prv + 1)	-- maximum as per parameter
+    | otherwise       = prv
 
 -- Attacs and defences of enemy hills: how many ants of us and of them are there?
 hillAttacs :: Point -> Int -> Int -> [Point] -> [Point] -> Point -> (Point, (Int, Int))
@@ -421,20 +433,25 @@ gotoPoint pt to = do
   st <- get
   let w = water . stState $ st
       u = stUpper st
+      mx = stCrtASt st
   -- liftIO $ hPutStr stderr $ "Path from " ++ show pt ++ " to " ++ show to ++ ": "
-  mpath <- liftIO $
-      E.catch (aStar (validDirs w u) (distance u to) pt (== to) (Just maxPLen))
-              (\e -> do
-                  hPutStrLn stderr $ "Exception in aStar: " ++ show e
-                  return Nothing
-              )
-  case mpath of
-    Nothing    -> return False
-    Just path' -> do
-      let path = reverse path'
-      -- liftIO $ hPutStrLn stderr $ show path
-      let plan = Plan { plPrio = Green, plTarget = to, plPath = path }
-      executePlan pt plan
+  if mx <= 0
+     then return False
+     else do
+       mpath <- liftIO $
+           E.catch (aStar (validDirs w u) (distance u to) pt (== to) Nothing)
+                   (\e -> do
+                       hPutStrLn stderr $ "Exception in aStar: " ++ show e
+                       return Nothing
+                   )
+       modify $ \s -> s { stCrtASt = mx - 1 }
+       case mpath of
+         Nothing    -> return False
+         Just path' -> do
+           let path = reverse path'
+           -- liftIO $ hPutStrLn stderr $ show path
+           let plan = Plan { plPrio = Green, plTarget = to, plPath = path }
+           executePlan pt plan
 
 -- Given a bitmap of "busy" points, and a source point, find
 -- the valid directions to move
