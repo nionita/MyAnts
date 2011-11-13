@@ -5,7 +5,7 @@ module Ants
   , GameParams (..)
   , GameState (..)
   , Order (..)
-  , Water
+  , BitMap
   , Point
 
     -- Utility functions
@@ -18,10 +18,9 @@ module Ants
     -- main function
   , game
 
-  -- TODO implement the following functions according to the starter pack guide
-  --, direction
+  -- other
 
-  , nearFood
+  , anyFood
   , allDirs
   , nextTo
   , nextAw
@@ -47,7 +46,7 @@ type Row = Int
 type Col = Int
 type Point = (Row, Col)
 type Hill  = (Point, Int)
-type Water = IOUArray Point Bool
+type BitMap = IOUArray Point Bool
 type Food  = S.Set Point
 
 -- Wrap the coordinates
@@ -82,7 +81,7 @@ data Order = Order
   } deriving (Show)
 
 data GameState a = GameState
-  { water  :: Water
+  { water  :: BitMap
   , waterP :: [Point]
   , ours   :: [Point]   -- our ants
   , ants   :: [Point]   -- other ants
@@ -307,8 +306,8 @@ game doTurn = do
   finishTurn -- signal done with setup
   gameLoop gp gs doTurn
 
-nearFood :: Point -> Food -> Point -> Bool
-nearFood bound food p = any (flip S.member food . move bound p) allDirs
+anyFood :: Food -> [Point] -> Bool
+anyFood food = any (`S.member` food)
 
 -- Which direction to take to a given point? And which neighbour is on the way?
 nextTo :: Point -> Point -> Point -> (Dir, Point)
