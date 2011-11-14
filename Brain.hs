@@ -3,7 +3,6 @@
 module Brain (doTurn) where
 
 import Control.Monad (filterM, when, forM_, liftM, liftM2, foldM)
-import qualified Control.OldException as E
 import Data.Array.Unboxed
 import Data.Array.IO
 import Data.List
@@ -49,11 +48,12 @@ type PlanMemo = M.Map Point Plan
 msReserve = 200		-- reserve time for answer back (ms)
 msDecrAst = 400		-- under this time we decrese the AStar seraches per turn
 msIncrAst = 700		-- over this time we increse the AStar seraches per turn
-maxMaxASt = 80	-- maximum AStar searches per turn
-attMajority = 2	-- used when attacking many to many
+maxMaxASt = 80		-- maximum AStar searches per turn
+attMajority = 2		-- used when attacking many to many
+viewRadius   = (1*) . viewradius2	-- visibility radius
 foodRadius   = (1*) . const 100	-- in which we go to food
 homeRadius   = (1*) . const 100	-- in which we consider to be at home
-razeRadius   = (2*) . const 100	-- in which we consider to raze enemy hills
+razeRadius   =        const 2500	-- in which we consider to raze enemy hills
 -- dangerRadius = (2*) . attackradius2	-- in which we are in danger
 dangerRadius = (1*) . attackradius2	-- in which we are in danger
 kamikaRadius = (1*) . attackradius2	-- we try a one to one fight (as we die anyway)
@@ -87,12 +87,8 @@ doTurn gp gs = do
   let plans = M.fromList $ stPlans finst
       astpt = aStarNextTurn (peMaxPASt npers) restTime
       fpers = (stPersist finst) { pePlMemo = plans, peMaxPASt = astpt }
-  -- hPutStrLn stderr $ "Orders: " ++ show (stOrders finst)
-  -- hPutStrLn stderr $ "Plans:"
-  -- mapM_ (hPutStrLn stderr . show) $ stPlans finst
-  hPutStrLn stderr $ "Time remaining (ms): " ++ show restTime
-  hPutStrLn stderr $ "Next aStar per turn: " ++ show astpt
-  -- let gsf = (stState finst) { ants = [], ours = [], foodP = [], userState = stPersist  }
+  -- hPutStrLn stderr $ "Time remaining (ms): " ++ show restTime
+  -- hPutStrLn stderr $ "Next aStar per turn: " ++ show astpt
   let gsf = gs { ants = [], ours = [], foodP = [], userState = Just fpers }
   return (orders, gsf)
 
@@ -150,7 +146,7 @@ blocked vs = return $ null vs
 -- When we can raze some hill not defended: do it!
 immRaze :: Point -> [PathInfo] -> MyGame Bool
 immRaze pt _ = do
-    mhr <- hillToRaze pt
+    mhr <- hillToRaze pt viewRadius
     case mhr of
         Nothing     -> return False
         Just (h, x) -> do
@@ -196,7 +192,7 @@ followPlan pt vs = do
 -- How to attack and raze an enemy hill
 razeAttac :: Point -> [PathInfo] -> MyGame Bool
 razeAttac pt vs = do
-    mhr <- hillToRaze pt
+    mhr <- hillToRaze pt razeRadius
     case mhr of
         Nothing     -> return False
         Just (h, x) -> do
@@ -204,7 +200,12 @@ razeAttac pt vs = do
             case lookup h (stWeakEH st) of
                 Nothing         -> return False
                 Just (us, them) -> do
-                    let (attac, retra) = attacProbs us them (stOurCnt st)
+                    let weall = stOurCnt st
+                        (attac, retra) = attacProbs x us them weall
+                    debug $ "Attack from " ++ show pt ++ " to " ++ show h
+                    debug $ "- Params: "
+                            ++ concat (intersperse " / " (map show [x, us, them, weall]))
+                    debug $ "- Probs:  " ++ show attac ++ " <-> " ++ show retra
                     act <- choose [(attac, gotoPoint pt h), (retra, return False)]
                     act
 
@@ -377,8 +378,8 @@ attackIt = moveTo True
 
 attackOne pt _ = moveRandom pt
 
-hillToRaze :: Point -> MyGame (Maybe (Point, Int))
-hillToRaze pt = do
+hillToRaze :: Point -> (GameParams -> Int) -> MyGame (Maybe (Point, Int))
+hillToRaze pt rf = do
   st <- get
   let gs = stState st
       -- take the active enemy hills
@@ -390,14 +391,14 @@ hillToRaze pt = do
          let u  = stUpper st
              (h, x) = head $ sortByDist id u pt hi
              gp = stPars st
-         if x > razeRadius gp
+         if x > rf gp
             then return Nothing	-- too far
             else return $ Just (h, x)
 
-attacProbs :: Int -> Int -> Int -> (Int, Int)
-attacProbs us them ours = (us * us * ours `div` afact, them * them * dfact `div` ours)
-    where afact = 20
-          dfact = 20
+attacProbs :: Int -> Int -> Int -> Int -> (Int, Int)
+attacProbs x us them ours = (us * us * ours `div` afact, them * them * dfact `div` ours)
+    where afact = 10 * x
+          dfact = 10 * x
 
 getOldPlan :: Point -> MyGame (Maybe Plan)
 getOldPlan pt = do
@@ -434,22 +435,15 @@ gotoPoint pt to = do
   let w = water . stState $ st
       u = stUpper st
       mx = stCrtASt st
-  -- liftIO $ hPutStr stderr $ "Path from " ++ show pt ++ " to " ++ show to ++ ": "
   if mx <= 0
      then return False
      else do
-       mpath <- liftIO $
-           E.catch (aStar (validDirs w u) (distance u to) pt (== to) Nothing)
-                   (\e -> do
-                       hPutStrLn stderr $ "Exception in aStar: " ++ show e
-                       return Nothing
-                   )
+       mpath <- liftIO $ aStar (validDirs w u) (distance u to) pt (== to) Nothing
        modify $ \s -> s { stCrtASt = mx - 1 }
        case mpath of
          Nothing    -> return False
          Just path' -> do
            let path = reverse path'
-           -- liftIO $ hPutStrLn stderr $ show path
            let plan = Plan { plPrio = Green, plTarget = to, plPath = path }
            executePlan pt plan
 
@@ -517,7 +511,7 @@ orderMove p d = do
         mvo = Order { source = p, direction = d }
         i = move u p d
     liftIO $ writeArray busy i True
-    debug $ "Order: " ++ show p ++ " -> " ++ show d ++ " (= " ++ show i ++ ")"
+    -- debug $ "Order: " ++ show p ++ " -> " ++ show d ++ " (= " ++ show i ++ ")"
     put st { stOrders = mvo : stOrders st }
     return True
 
@@ -576,5 +570,5 @@ seenPoint p = do
     lift $ readArray seen p
 
 debug :: String -> MyGame ()
--- debug s = liftIO $ hPutStrLn stderr s
-debug _ = return ()
+debug s = liftIO $ hPutStrLn stderr s
+-- debug _ = return ()
