@@ -9,6 +9,7 @@ import Data.List
 import qualified Data.Map as M
 import Data.Maybe (fromJust)
 import Data.Ord (comparing)
+import qualified Data.Set as S
 import System.IO
 import System.Random
 
@@ -26,6 +27,7 @@ data MyState = MyState {
          stOrders  :: [Order],			-- accumulates orders
          stPlans   :: [(Point, Plan)],		-- accumulates plans
          stWeakEH  :: [(Point, (Int, Int))],	-- weakness of enemy hills
+         stFrFood  :: Food,			-- still untargeted food
          stOurCnt  :: Int,			-- total count of our ants
          stCrtASt  :: Int			-- current astar searches
      }
@@ -41,7 +43,7 @@ type MyGame a = forall r. CPS r MyState IO a
 
 -- Plans we calculate and must remember: priority, target and path
 data Prio = Green | Yellow | Red deriving (Eq, Ord, Show)
-data Plan = Plan { plPrio :: Prio, plTarget :: Point, plPath :: [PathInfo] } deriving Show
+data Plan = Plan { plPrio :: Prio, plTarget :: Point, plPath :: [PathInfo], plWait :: Int } deriving Show
 type PlanMemo = M.Map Point Plan
 
 -- Some constants and constant-like definitions:
@@ -50,6 +52,7 @@ msDecrAst = 400		-- under this time we decrese the AStar seraches per turn
 msIncrAst = 700		-- over this time we increse the AStar seraches per turn
 maxMaxASt = 80		-- maximum AStar searches per turn
 attMajority = 2		-- used when attacking many to many
+maxPlanWait = 3		-- how long to wait in a plan when path is blocked
 viewRadius   = (1*) . viewradius2	-- visibility radius
 foodRadius   = (1*) . const 100	-- in which we go to food
 homeRadius   = (1*) . const 100	-- in which we consider to be at home
@@ -64,6 +67,7 @@ doTurn gp gs = do
   b <- getBounds $ water gs
   -- get the persistent information (between turns)
   npers <- case userState gs of
+               -- Just pers -> return $ cleanDeadPlans gs pers	-- is it necessary?
                Just pers -> return pers
                Nothing   -> do
                    nseen <- newArray b False
@@ -75,12 +79,13 @@ doTurn gp gs = do
   -- take only the active ones (actually not razed by us)
   hi <- filterM (liftM not . readArray (peSeen npers)) $ nub $ hinow ++ peEnHills npers
   let attacs = map (hillAttacs (snd b) (razeRadius gp) (homeRadius gp) (ours gs) (ants gs)) hi
+      tfood = S.fromList $ map plTarget $ M.elems (pePlMemo npers)	-- plan targets
       initst = MyState {
                    stPars = gp, stState = gs, stBusy = busy,
                    stPersist = npers { peEnHills = hi },
                    stUpper = snd b, stOrders = [], stPlans = [],
                    stOurCnt = length (ours gs), stWeakEH = attacs,
-                   stCrtASt = peMaxPASt npers
+                   stCrtASt = peMaxPASt npers, stFrFood = food gs `S.difference` tfood
                }
   (orders, finst) <- runState (makeOrders $ ours gs) initst
   restTime <- timeRemaining gp gs
@@ -103,6 +108,13 @@ hillAttacs :: Point -> Int -> Int -> [Point] -> [Point] -> Point -> (Point, (Int
 hillAttacs bound rr hr os as h = (h, (us, them))
     where us   = length $ inRadius2 id rr bound h os
           them = length $ inRadius2 id hr bound h as
+
+{--
+-- Clean plans of our dead ants
+cleanDeadPlans :: GameState Persist -> Persist -> (Persist, [Plan])
+cleanDeadPlans gs pe =
+    where npl = M.intersection (pePlMemo pe) $ M.fromList $ zip (ours gs) $ repeat True
+--}
 
 makeOrders :: [Point] -> MyGame [Order]
 makeOrders [] = gets stOrders
@@ -154,7 +166,7 @@ immRaze pt _ = do
             let bound = stUpper st
                 as = ants $ stState st
             if null $ inRadius2 id x bound h as
-               then gotoPoint pt h
+               then gotoPoint False pt h
                else return False
 
 -- When we face other ants, we have to take care!
@@ -177,9 +189,12 @@ oneChoice pt vs =
 pickFood :: Point -> [PathInfo] -> MyGame Bool
 pickFood pt vs = do
   food <- gets $ food . stState
-  if anyFood food $ map snd vs
-     then replicatePlan pt
-     else return False
+  let foods = getFoods food $ map snd vs
+  if null foods
+     then return False
+     else do
+         deleteTargets foods
+         replicatePlan pt
 
 -- If we have a plan: execute it
 followPlan :: Point -> [PathInfo] -> MyGame Bool
@@ -206,23 +221,23 @@ razeAttac pt vs = do
                     debug $ "- Params: "
                             ++ concat (intersperse " / " (map show [x, us, them, weall]))
                     debug $ "- Probs:  " ++ show attac ++ " <-> " ++ show retra
-                    act <- choose [(attac, gotoPoint pt h), (retra, return False)]
+                    act <- choose [(attac, gotoPoint False pt h), (retra, return False)]
                     act
 
--- Go to some food, if easy reachable
+-- Go to some free food, in some radius
 gotoFood :: Point -> [PathInfo] -> MyGame Bool
 gotoFood pt vs = do
   st <- get
-  let gs = stState st
-      fo = foodP gs
-  if null fo
+  let frf = stFrFood st
+  if S.null frf
      then return False
      else do
+         let fo = S.toList frf
          -- take the nearest food in some radius
-         let u  = stUpper st
+             u  = stUpper st
              gp = stPars st
              foods = takeWhile ((<= foodRadius gp) . snd) $ sortByDist id u pt fo
-         takeFirst (gotoPoint pt) $ map fst foods
+         takeFirst (gotoPoint True pt) $ map fst foods
 
 -- When boring:
 rest pt vs = do
@@ -265,13 +280,13 @@ attackManyToOne pt os en = do
        then do
            let [(fsp, fsx), (sep, sex)] = as
            if pt /= fsp || fsx == sex
-              then gotoPoint pt en
+              then gotoPoint False pt en
               else return True
        else do
            let [(fsp, fsx), (sep, sex), (thp, thx)] = as
            if pt `elem` [fsp, sep, thp]
               then if pt /= fsp || fsx == sex
-                      then gotoPoint pt en
+                      then gotoPoint False pt en
                       else return True
               else return False
 
@@ -428,9 +443,9 @@ takeFirst f (p:ps) = do
     if r then return r else takeFirst f ps
 
 -- Go to a point if there is no water in between
-gotoPoint :: Point -> Point -> MyGame Bool
-gotoPoint pt to | pt == to = return False
-gotoPoint pt to = do
+gotoPoint :: Bool -> Point -> Point -> MyGame Bool
+gotoPoint _ pt to | pt == to = return False
+gotoPoint isFood pt to = do
   st <- get
   let w = water . stState $ st
       u = stUpper st
@@ -444,7 +459,8 @@ gotoPoint pt to = do
          Nothing    -> return False
          Just path' -> do
            let path = reverse path'
-           let plan = Plan { plPrio = Green, plTarget = to, plPath = path }
+               plan = Plan { plPrio = Green, plTarget = to, plPath = path, plWait = maxPlanWait }
+           -- when isFood $ modify $ \s -> s { stFrFood = S.delete to (stFrFood s) }
            executePlan pt plan
 
 -- Given a bitmap of "busy" points, and a source point, find
@@ -519,11 +535,40 @@ executePlan :: Point -> Plan -> MyGame Bool
 executePlan pt plan | null (plPath plan) = return False
 executePlan pt plan = do
     let ((d, p) : path) = plPath plan
-    b <- isBusy p
-    if b then return False else do	-- here: if it's not water, we should wait
-       orderMove pt d
-       newPlan p plan { plPath = path }
-       return True
+    w <- isWater p
+    if w
+       then return False
+       else do
+           b <- isBusy p
+           if b
+              then do
+                  act <- choose [
+                             (1, return False),
+                             (plWait plan - 1, 
+                                 newPlan p plan { plWait = plWait plan - 1 } >> return True)
+                         ]
+                  act
+              {--
+              then if plWait plan > 0
+                      then do
+                          newPlan p plan { plWait = plWait plan - 1 }
+                          return True
+                      else return False
+              --}
+              else do
+                  orderMove pt d
+                  newPlan p plan { plPath = path, plWait = maxPlanWait }
+                  return True
+
+deleteTargets :: [Point] -> MyGame ()
+deleteTargets foods = do
+    st <- get
+    let food   = stFrFood st
+        food'  = foldr S.delete food foods
+        pers   = stPersist st
+        plans  = pePlMemo pers
+        plans' = M.filter ((`elem` foods) . plTarget) plans
+    put st { stFrFood = food', stPersist = pers { pePlMemo = plans' }}
 
 -- Init bad/busy squares: just a copy of water
 -- plus the food and the current own ants
@@ -537,10 +582,16 @@ initBusy gs = do
 updateSeen :: GameState Persist -> BitMap -> IO ()
 updateSeen gs busy = forM_ (ours gs) $ \p -> writeArray busy p True
 
-isBusy :: Point -> MyGame Bool
-isBusy p = do
-    busy <- gets stBusy
-    lift $ readArray busy p
+isBitMap :: (MyState -> BitMap) -> Point -> MyGame Bool
+isBitMap f p = do
+    bm <- gets f
+    lift $ readArray bm p
+
+isWater = isBitMap (water . stState)
+
+isBusy = isBitMap stBusy
+
+seenPoint = isBitMap (peSeen . stPersist)
 
 filterBusy :: (a -> Point) -> [a] -> MyGame [a]
 filterBusy f as = do
@@ -548,26 +599,8 @@ filterBusy f as = do
     let busy = stBusy st
     lift $ filterM (\a -> liftM not $ readArray busy (f a)) as
 
-someWater :: [Point] -> MyGame Bool
-someWater ps = do
-    w <- gets $ water . stState
-    lift $ waterGo w ps
-
-waterGo :: BitMap -> [Point] -> IO Bool
-waterGo w [] = return False
-waterGo w (a:as) = do
-    b <- readArray w a
-    if b
-       then return b
-       else waterGo w as
-
 notWater :: BitMap -> [(a, Point)] -> IO [(a, Point)]
 notWater w = filterM (liftM not . readArray w . snd)
-
-seenPoint :: Point -> MyGame Bool
-seenPoint p = do
-    seen <- gets (peSeen . stPersist)
-    lift $ readArray seen p
 
 debug :: String -> MyGame ()
 debug s = liftIO $ hPutStrLn stderr s

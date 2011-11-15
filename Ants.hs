@@ -6,6 +6,7 @@ module Ants
   , GameState (..)
   , Order (..)
   , BitMap
+  , Food
   , Point
 
     -- Utility functions
@@ -20,7 +21,7 @@ module Ants
 
   -- other
 
-  , anyFood
+  , getFoods
   , allDirs
   , nextTo
   , nextAw
@@ -306,8 +307,8 @@ game doTurn = do
   finishTurn -- signal done with setup
   gameLoop gp gs doTurn
 
-anyFood :: Food -> [Point] -> Bool
-anyFood food = any (`S.member` food)
+getFoods :: Food -> [Point] -> [Point]
+getFoods food = filter (`S.member` food)
 
 -- Which direction to take to a given point? And which neighbour is on the way?
 nextTo :: Point -> Point -> Point -> (Dir, Point)
