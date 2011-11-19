@@ -13,6 +13,7 @@ module Ants
   , timeRemaining
   , move
   , distance
+  , euclidSquare
   , sortByDist
   , inRadius2
 
@@ -79,13 +80,14 @@ instance Show Dir where
 data Order = Order
   { source :: Point
   , direction :: Dir
+  , logic :: String
   } deriving (Show)
 
 data GameState a = GameState
   { water  :: BitMap
   , waterP :: [Point]
   , ours   :: [Point]   -- our ants
-  , ants   :: [Point]   -- other ants
+  , ants   :: [(Int, Point)]   -- other ants
   , foodP  :: [Point]
   , food   :: Food
   , hills  :: [Hill]
@@ -150,10 +152,12 @@ issueOrder order = do
       sdir = show . direction $ order
   putStrLn $ "o " ++ srow ++ " " ++ scol ++ " " ++ sdir
 
-finishTurn :: IO ()
-finishTurn = do
+finishTurn :: [Order] -> IO ()
+finishTurn ords = do
   putStrLn "go"
   hFlush stdout
+  -- hPutStrLn stderr "Orders"
+  -- mapM_ (hPutStrLn stderr . show) ords
   performGC
 
 tuplify2 :: [a] -> (a, a)
@@ -173,9 +177,9 @@ addHill gs h = gs { hills = nhills }
     where nhills = h : delete h (hills gs)
 
 addAnt :: GameState a -> (Point, Int) -> GameState a
-addAnt gs (p, i) = if i == 0
+addAnt gs a@(p, i) = if i == 0
                       then gs { ours = p : ours gs }
-                      else gs { ants = p : ants gs }
+                      else gs { ants = (i, p) : ants gs }
 
 -- Currently we ignore the dead ants
 addDead :: GameState a -> Point -> GameState a
@@ -291,7 +295,7 @@ gameLoop gp gs doTurn = do
           (orders, gs2) <- doTurn gp gs1
           -- hPutStrLn stderr $ show orders
           mapM_ issueOrder orders
-          finishTurn
+          finishTurn orders
           gameLoop gp gs2 doTurn
       | B.pack "end" `B.isPrefixOf` line = endGame
       | otherwise = do
@@ -304,7 +308,7 @@ game doTurn = do
   let gp = createParams $ map (tuplify2 . B.words) paramInput
   hPutStrLn stderr $ "Params:\n" ++ show gp
   gs <- initialGameState gp
-  finishTurn -- signal done with setup
+  finishTurn [] -- signal done with setup
   gameLoop gp gs doTurn
 
 getFoods :: Food -> [Point] -> [Point]
@@ -339,6 +343,7 @@ sortRevByDist f bound from as = sortBy (comparing (negate . snd))
 
 -- Find <point+info> in a given radius (squared)
 inRadius2 :: (a -> Point) -> Int -> Point -> Point -> [a] -> [a]
-inRadius2 f r bound from as = filter ((<=r) . distance bound from . f) as
+-- inRadius2 f r bound from as = filter ((<=r) . distance bound from . f) as
+inRadius2 f r bound from as = filter ((<=r) . euclidSquare bound from . f) as
 
 -- vim: set expandtab:

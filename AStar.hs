@@ -33,15 +33,15 @@ aStar :: (Monad m, Functor m)
       -> (Point -> Int)			-- heuristic funtion (target point is in closure)
       -> Point				-- from point
       -> (Point -> Bool)		-- function to check that we are there
-      -> Maybe Int			-- maximum length
+      -> Maybe Int			-- maximum path length
       -> m (Maybe [PathInfo])		-- returns: possibly a path
 aStar fions heur from fulfilled mmax = go iopen S.empty
     where iopen = opSingleton from ((0, heur from), []) :: BiMap
           go open closed
              | opIsEmpty open = return Nothing	-- no path
              | fulfilled op   = return rez
-             | Just mx <- mmax, g oi >= mx	-- we reached maximum length
-                              = return rez
+             | Just mx <- mmax, g oi + heur op >= mx	-- we reached maximum length
+                              = return Nothing
              | otherwise = do
                  let closed' = S.insert op closed
                  open' <- expandNode fions heur o os closed'

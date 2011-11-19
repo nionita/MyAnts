@@ -1,0 +1,16 @@
+Root	= j:/Projects/Ants/tools
+Play	= python $(Root)/playgame.py
+LogDir	= game_logs
+Turns	= 1000
+Maps	= maps
+Pars	= --end_wait=0.5 --vebose --log_error
+Engine  = $(Root)/source/MyBot.exe
+Engines	= [
+	Greedy = python $(Root)/sample_bots/python/GreedyBot.py
+	Lefty  = python $(Root)/sample_bots/python/LeftyBot.py
+	Hunter = python $(Root)/sample_bots/python/HunterBot.py
+	Random = python $(Root)/sample_bots/python/RandomBot.py
+	MyGoodBot = $(Root)/source/MyGoodBot.exe
+	MyBotv6   = $(Root)/source/MyBot-v6.exe
+	MyBot40   = $(Root)/source/MyBot40.exe
+    ]
