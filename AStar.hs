@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternGuards #-}
 module AStar (
     PathInfo,
     aStar

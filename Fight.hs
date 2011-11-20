@@ -1,4 +1,5 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE PatternGuards #-}
 module Fight
       (
       EDir(..),
