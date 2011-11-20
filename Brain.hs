@@ -171,7 +171,8 @@ perFightZone nf nf1 fz@(us, themm) = do
              unsafeFreeze busy
     let u  = stUpper st
         -- here are the parameter of the evaluation
-        epar = EvalPars { pes = 10, opt = 10, reg = stOurCnt st, tgt = Nothing }
+        reg' = min 100 $ stOurCnt st
+        epar = EvalPars { pes = 10, opt = 10, reg = reg', tgt = Nothing }
         (sco, cfs) = nextTurn nf nf1 (valDirs ibusy u) epar us themm
         oac = fst cfs
     debug $ "Fight zone: us = " ++ show us ++ ", them = " ++ show themm
@@ -364,7 +365,7 @@ gotoFood pt vs = do
 
 -- When boring:
 rest pt vs = do
-    act <- choose [(3, maiRar pt), (2, explore pt vs), (1, moveRandom pt vs)]
+    act <- choose [(2, maiRar pt), (3, explore pt vs), (1, moveRandom pt vs)]
     act
 
 -- Fight section
@@ -727,5 +728,5 @@ notWater w = filterM (liftM not . readArray w . snd)
 near r u a b = euclidSquare u a b <= r
 
 debug :: String -> MyGame ()
-debug s = liftIO $ hPutStrLn stderr s
--- debug _ = return ()
+-- debug s = liftIO $ hPutStrLn stderr s
+debug _ = return ()

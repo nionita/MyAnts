@@ -97,7 +97,7 @@ interMove near near1 gfun a pla toMove pm = go [] $ extend gfun a
 -- For now we just make the difference: enemy loss - our loss
 -- Bigger is better
 evalOutcome :: DstFun -> EvalPars -> PoiMap -> Int
-evalOutcome near epar final = -our + (the - our) * w
+evalOutcome near epar final = our * (w - 100) + (the - our) * w
     where lom = getLosses near final
           all = M.fold (+) 0 lom
           our = maybe 0 id $ M.lookup 0 lom
