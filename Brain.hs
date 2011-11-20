@@ -96,7 +96,7 @@ doTurn gp gs = do
   -- (orders, finst) <- runState (makeOrders $ ours gs) initst
   (fzs', st1) <- runState (fightAnts fzs) st0	-- first the fighting ants
   -- let ofree = myFreeAnts (ours gs) fzs'
-  let ofree = myFreeAnts (ours gs) fzs
+  let ofree = myFreeAnts (ours gs) fzs'
   stf <- execState (freeAnts ofree) st1	-- then the free ants
   restTime <- timeRemaining gp gs
   let plans = M.fromList $ stPlans stf
@@ -149,28 +149,26 @@ fightAnts fs
     | otherwise = do
         st <- get
         let gp = stPars st
-            gs = stState st
             u  = stUpper st
-        iwatfo <- liftIO $ do
-                watfo <- mapArray id (water gs)
-                forM_ (foodP gs) $ \p -> writeArray watfo p True
-                unsafeFreeze watfo
-        let nf = near (attackradius2 gp) u
-            gf = valDirs iwatfo u
-        mapM_ (perFightZone nf gf) fs'
+            nf = near (attackradius2 gp) u
+        mapM_ (perFightZone nf) fs'
         return fs'
-    where valDirs :: UArray Point Bool -> Point -> Point -> [(Dir, Point)]
-          valDirs w u pt = filter (not . (w!) . snd) $ map (\d -> (d, move u pt d)) allDirs
-          (fs', fs'') = partition (\(ps, tm) -> length ps + points tm <= zoneMax) fs
+    where (fs', _) = partition (\(ps, tm) -> length ps + points tm <= zoneMax) fs
           points tm = sum $ map length $ M.elems tm
 
-perFightZone nf gf (us, themm) = do
-    co <- gets stOurCnt
-    let -- here we decide how pessimistic or optimistic we are
+perFightZone nf (us, themm) = do
+    st <- get
+    ibusy <- liftIO $ do
+             busy <- mapArray id (stBusy st)
+             forM_ us $ \p -> writeArray busy p False
+             unsafeFreeze busy
+    let u  = stUpper st
+        -- here we decide how pessimistic or optimistic we are
+        co = stOurCnt st
         op = 0
         -- op = if co > 50 then 30 else 0
         pe = if co <= 50 then 80 else 0
-        (sco, cfs) = nextTurn nf gf (pe, op) us themm
+        (sco, cfs) = nextTurn nf (valDirs ibusy u) (pe, op) us themm
         -- (ac, pm) = head cfs
         -- oac = filter (\(p, _) -> maybe False (==0) $ M.lookup p pm) ac
         oac = fst $ head cfs
@@ -178,6 +176,8 @@ perFightZone nf gf (us, themm) = do
     debug $ "Params: pes = " ++ show pe ++ " opt = " ++ show op
             ++ " score = " ++ show sco ++ "\nOur moves: " ++ show oac
     mapM_ extOrderMove oac
+    where valDirs :: UArray Point Bool -> Point -> Point -> [(Dir, Point)]
+          valDirs w u pt = filter (not . (w!) . snd) $ map (\d -> (d, move u pt d)) allDirs
 
 extOrderMove :: (Point, EDir) -> MyGame ()
 extOrderMove (pt, edir) = do
@@ -186,14 +186,11 @@ extOrderMove (pt, edir) = do
         Stay -> markWait pt
     return ()
 
-markWait _ = return True
-{--
 markWait pt = do
     st <- get
     let busy = stBusy st
     liftIO $ writeArray busy pt True
     return True
---}
 
 -- Combine the strategies for the move generation
 (<|>) :: MyGame Bool -> MyGame Bool -> MyGame Bool
