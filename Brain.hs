@@ -7,7 +7,7 @@ import Data.Array.Unboxed
 import Data.Array.IO
 import Data.List
 import qualified Data.Map as M
-import Data.Maybe (fromJust)
+import Data.Maybe (fromJust, catMaybes)
 import Data.Ord (comparing)
 import qualified Data.Set as S
 import System.IO
@@ -55,7 +55,7 @@ maxMaxASt = 80		-- maximum AStar searches per turn
 attMajority = 2		-- used when attacking many to many
 maxPlanWait = 3		-- how long to wait in a plan when path is blocked
 checkEasyFood = 10	-- how often to check for easy food?
-zoneMax      = 8	-- max ants in a zone fight
+zoneMax      = 9	-- max ants in a zone fight
 viewRadius   = (1*) . viewradius2	-- visibility radius
 foodRadius   = (1*) . const 100	-- in which we go to food
 homeRadius   = (1*) . const 100	-- in which we consider to be at home
@@ -90,7 +90,7 @@ doTurn gp gs = do
                    stOurCnt = length (ours gs), stWeakEH = attacs,
                    stCrtASt = peMaxPASt npers, stFrFood = food gs -- `S.difference` tfood
                }
-      zoneRadius2 = attackradius2 gp + 4 + ceiling (4 * sqrt (fromIntegral (attackradius2 gp)))
+      zoneRadius2 = hellSteps (attackradius2 gp) 2
       fzs = fightZones (near zoneRadius2 (snd b)) (ours gs) (ants gs) []
   when (not $ null fzs) $ hPutStrLn stderr $ "Fight zones:\n" ++ show fzs
   -- (orders, finst) <- runState (makeOrders $ ours gs) initst
@@ -141,7 +141,12 @@ freeAnts points = do
       freeAnts $ tail points
 
 -- Our ants not involved in any fight zone
-myFreeAnts os fzs = S.toList $ S.fromList os `S.difference` (S.fromList $ concatMap fst fzs)
+myFreeAnts :: [Point] -> [Point] -> [Point]
+-- myFreeAnts os osf = S.toList $ S.fromList os `S.difference` (S.fromList $ concatMap fst fzs)
+myFreeAnts os osf = S.toList $ S.fromList os `S.difference` S.fromList osf
+
+hellSteps :: Int -> Int -> Int
+hellSteps ar x = ar + x*x + ceiling (2 * fromIntegral x * sqrt (fromIntegral ar))
 
 -- Orders for the fighting ants
 fightAnts fs
@@ -150,41 +155,38 @@ fightAnts fs
         st <- get
         let gp = stPars st
             u  = stUpper st
-            nf = near (attackradius2 gp) u
-        mapM_ (perFightZone nf) fs'
-        return fs'
-    where (fs', _) = partition (\(ps, tm) -> length ps + points tm <= zoneMax) fs
+            ra1 = hellSteps (attackradius2 gp) 1
+            nf  = near (attackradius2 gp) u
+            nf1 = near ra1 u
+        fss <- mapM (perFightZone nf nf1) fs'
+        return $ concat $ fss ++ map fst fs''
+    where (fs', fs'') = partition (\(ps, tm) -> length ps + points tm <= zoneMax) fs
           points tm = sum $ map length $ M.elems tm
 
-perFightZone nf (us, themm) = do
+perFightZone nf nf1 fz@(us, themm) = do
     st <- get
     ibusy <- liftIO $ do
              busy <- mapArray id (stBusy st)
              forM_ us $ \p -> writeArray busy p False
              unsafeFreeze busy
     let u  = stUpper st
-        -- here we decide how pessimistic or optimistic we are
-        co = stOurCnt st
-        op = 0
-        -- op = if co > 50 then 30 else 0
-        pe = if co <= 50 then 80 else 0
-        (sco, cfs) = nextTurn nf (valDirs ibusy u) (pe, op) us themm
-        -- (ac, pm) = head cfs
-        -- oac = filter (\(p, _) -> maybe False (==0) $ M.lookup p pm) ac
-        oac = fst $ head cfs
+        -- here are the parameter of the evaluation
+        epar = EvalPars { pes = 10, opt = 10, reg = stOurCnt st, tgt = Nothing }
+        (sco, cfs) = nextTurn nf nf1 (valDirs ibusy u) epar us themm
+        oac = fst cfs
     debug $ "Fight zone: us = " ++ show us ++ ", them = " ++ show themm
-    debug $ "Params: pes = " ++ show pe ++ " opt = " ++ show op
-            ++ " score = " ++ show sco ++ "\nOur moves: " ++ show oac
-    mapM_ extOrderMove oac
+    debug $ "Params: " ++ show epar ++ " score = " ++ show sco ++ "\nOur moves: " ++ show oac
+    used <- mapM extOrderMove oac
+    return $ catMaybes used
     where valDirs :: UArray Point Bool -> Point -> Point -> [(Dir, Point)]
           valDirs w u pt = filter (not . (w!) . snd) $ map (\d -> (d, move u pt d)) allDirs
 
-extOrderMove :: (Point, EDir) -> MyGame ()
+extOrderMove :: (Point, EDir) -> MyGame (Maybe Point)
 extOrderMove (pt, edir) = do
     case edir of
-        Go d -> orderMove pt d "fight"
-        Stay -> markWait pt
-    return ()
+        Go d -> orderMove pt d "fight" >> return (Just pt)
+        Stay -> markWait pt >> return (Just pt)
+        Any  -> return Nothing
 
 markWait pt = do
     st <- get
@@ -208,7 +210,7 @@ getGoal pt (bst, vs) =
     -- blocked pt bst vs <|>
     oneChoice pt bst vs <|>
     immRaze pt vs <|>
-    danger pt vs <|>
+    -- danger pt vs <|>
     pickFood pt vs <|>
     followPlan pt vs <|>
     razeAttac pt vs <|>

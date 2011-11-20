@@ -1,9 +1,11 @@
+{-# LANGUAGE BangPatterns #-}
 module Fight
---    (
---    EDir(..),
---    fightZones,
---    nextTurn
---    )
+      (
+      EDir(..),
+      EvalPars(..),
+      fightZones,
+      nextTurn
+      )
 where
 
 import Data.List
@@ -12,7 +14,7 @@ import qualified Data.Set as S
 
 import Ants
 
-data EDir = Stay | Go Dir deriving Show	-- extended direction, as we can also choose to wait
+data EDir = Any | Stay | Go Dir deriving (Eq, Show)	-- extended direction, as we can also choose to wait
 type Action = (Point, EDir)		-- start point and direction to move
 type GenFun = Point -> [(Dir, Point)]	-- to generate legal neighbours
 type DstFun = Point -> Point -> Bool	-- to tell if 2 points are "near"
@@ -20,56 +22,87 @@ type ToMove = M.Map Int [Point]		-- yet to move players/ants
 type PoiMap = M.Map Point Int		-- which players ant is in that point
 type Config = ([Action], PoiMap)	-- actions and resulting distribution
 
+data EvalPars = EvalPars {
+                    pes :: Int,		-- weight of the worst case
+                    opt :: Int,		-- weight of the best case (100-pes-opt=weight of avg)
+                    reg :: Int,		-- weight of enemy ants (100-reg=weight of ours)
+                    tgt :: Maybe Point	-- target: we will move to this point
+                } deriving Show
+
 -- This function calculates the best final configurations (and the moves
 -- needed to reach them) per fight area
-nextTurn :: DstFun -> GenFun -> (Int, Int) -> [Point] -> ToMove -> (Int, [Config])
-nextTurn near gfun peso us toMove = getMaxs (minBound, []) $ ourMoves near gfun peso us toMove
-    where getMaxs acc [] = acc
-          getMaxs acc@(mx, cs) ((c, i) : cis)
-              | i >  mx = getMaxs (i, [c]) cis
-              | i == mx = getMaxs (mx, c:cs) cis
-              | i <  mx = getMaxs acc cis
+-- nextTurn :: DstFun -> GenFun -> (Int, Int) -> [Point] -> ToMove -> (Int, [Config])
+-- nextTurn near gfun peso us toMove = getMaxs (minBound, []) $ ourMoves near gfun peso us toMove
+--    where getMaxs acc [] = acc
+--          getMaxs acc@(mx, cs) ((c, i) : cis)
+--              | i >  mx = getMaxs (i, [c]) cis
+--              | i == mx = getMaxs (mx, c:cs) cis
+--              | i <  mx = getMaxs acc cis
+nextTurn :: DstFun -> DstFun -> GenFun -> EvalPars -> [Point] -> ToMove -> (Int, Config)
+nextTurn near near1 gfun epar us toMove
+    = getMaxs (minBound, c0) $ ourMoves near near1 gfun epar us toMove
+    where getMaxs !acc [] = acc
+          getMaxs !acc@(!mx, cs) ((c, i) : cis)
+              | i >  mx   = getMaxs (i, c) cis
+              -- | i == mx   = getMaxs (i, c) cis
+              | otherwise = getMaxs acc cis
+          c0 = ([], M.empty)
 
 -- Evaluate every of our moves with the average of the possible answers
-ourMoves :: DstFun -> GenFun -> (Int, Int) -> [Point] -> ToMove -> [(Config, Int)]
-ourMoves near gfun (pes, opt) us toMove = do
-    myc <- nextAnt True gfun 0 us toMove ([], M.empty)
-    let ocfs = nextPlayer gfun toMove myc
-        avg  = average pes opt $ map (evalOutcome near . snd) ocfs
+ourMoves :: DstFun -> DstFun -> GenFun -> EvalPars -> [Point] -> ToMove -> [(Config, Int)]
+ourMoves near near1 gfun epar us toMove = do
+    myc <- nextAnt True near near1 gfun 0 us toMove ([], M.empty)
+    let ocfs = nextPlayer near near1 gfun toMove myc
+        avg  = average (pes epar) (opt epar) $ map (evalOutcome near epar . snd) ocfs
     return (myc, avg)
 
 -- Choose next player to move
-nextPlayer :: GenFun -> ToMove -> Config -> [Config]
-nextPlayer gfun toMove conf
+nextPlayer :: DstFun -> DstFun -> GenFun -> ToMove -> Config -> [Config]
+nextPlayer near near1 gfun toMove conf
     | M.null toMove = return conf
     | otherwise     = do
         let (pla, pants) = M.findMin toMove
             toMove' = M.delete pla toMove
-        nextAnt False gfun pla pants toMove' conf
+        nextAnt False near near1 gfun pla pants toMove' conf
 
--- Choose next ant to move, make all valid moves
-nextAnt :: Bool -> GenFun -> Int -> [Point] -> ToMove -> Config -> [Config]
-nextAnt stop gfun _   []     toMove conf = if stop then return conf else nextPlayer gfun toMove conf
-nextAnt stop gfun pla (a:as) toMove conf = do
-    (d, p) <- extend gfun a	-- here we could prune "uninteresting" moves (at least for the last player)
-    case M.lookup p (snd conf) of
-        Just _  -> fail	"busy" -- that neighbour is busy
-        Nothing -> do
-            let acts = (a, d) : fst conf
-                final = M.insert p pla (snd conf)
-            nextAnt stop gfun pla as toMove (acts, final)
+-- Choose next ant to move, make all valid (and interesting) moves
+-- Functions near and near1 are used to prune uninteresting moves
+-- near ist the fight distance, near1 ist fight distance "+ 1" (i.e. one move
+-- from the fight distance)
+nextAnt :: Bool -> DstFun -> DstFun -> GenFun -> Int -> [Point] -> ToMove -> Config -> [Config]
+nextAnt stop near near1 gfun _   []     toMove conf
+    = if stop then return conf else nextPlayer near near1 gfun toMove conf
+nextAnt stop near near1 gfun pla (a:as) toMove (acs, mp) = do
+    (d, p) <- interMove near near1 gfun a pla toMove mp
+    let acts = (a, d) : acs
+        final = if d == Any then mp else M.insert p pla mp
+    nextAnt stop near near1 gfun pla as toMove (acts, final)
 
 extend :: (Point -> [(Dir, Point)]) -> Point -> [(EDir, Point)]
 extend f p = (Stay, p) : map (\(d, p') -> (Go d, p')) (f p)
 
+-- Filter all possible moves: must not go to a busy point and must be interesting
+interMove :: DstFun -> DstFun -> GenFun -> Point -> Int -> ToMove -> PoiMap -> [(EDir, Point)]
+interMove near near1 gfun a pla toMove pm = go [] $ extend gfun a
+    where go acc [] = if null acc then [(Any, a)] else acc
+          go acc (m@(_, p):ms) = case M.lookup p pm of
+             Just _  -> go acc ms
+             Nothing -> if any (near1 p) tml || any (near p) cfl
+                           then go (m:acc) ms
+                           else go acc ms
+          tml = concatMap snd $ filter ((/= pla) . fst) $ M.assocs toMove
+          cfl = map fst $ filter ((/= pla) . snd) $ M.assocs pm
+
 -- Having a final configuration we want to evaluate the outcome
 -- For now we just make the difference: enemy loss - our loss
 -- Bigger is better
-evalOutcome :: DstFun -> PoiMap -> Int
-evalOutcome near final = all - 2 * our	-- because we counted them twice
+evalOutcome :: DstFun -> EvalPars -> PoiMap -> Int
+evalOutcome near epar final = -our + (the - our) * w
     where lom = getLosses near final
           all = M.fold (+) 0 lom
           our = maybe 0 id $ M.lookup 0 lom
+          the = all - our
+          w   = reg epar
 
 -- We return the dead ants per (involved) player (a map)
 -- Than we can weight the looses with some factors (in the caller)
@@ -149,6 +182,8 @@ restOursAnts pps = (us, them)
 
 average :: Int -> Int -> [Int] -> Int
 average pes opt xs = go (0, 0, maxBound, minBound) xs
-    where go (s, c, mi, ma) []     = (mi * pes + (s * av `div` c) + ma * opt) `div` 100
-          go (s, c, mi, ma) (x:xs) = go (s+x, c+1, min mi x, max ma x) xs
+    where go (!s, !c, !mi, !ma) []     = if c == 0
+                                            then 0
+                                            else (mi * pes + (s * av `div` c) + ma * opt) `div` 100
+          go (!s, !c, !mi, !ma) (x:xs) = go (s+x, c+1, min mi x, max ma x) xs
           av = 100 - pes - opt
