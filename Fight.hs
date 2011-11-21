@@ -15,7 +15,7 @@ import qualified Data.Set as S
 
 import Ants
 
-data EDir = Any | Stay | Go Dir deriving (Eq, Show)	-- extended direction, as we can also choose to wait
+data EDir = Any [EDir] | Stay | Go Dir deriving (Eq, Show)	-- extended direction, as we can also choose to wait
 type Action = (Point, EDir)		-- start point and direction to move
 type GenFun = Point -> [(Dir, Point)]	-- to generate legal neighbours
 type DstFun = Point -> Point -> Bool	-- to tell if 2 points are "near"
@@ -76,7 +76,9 @@ nextAnt stop near near1 gfun _   []     toMove conf
 nextAnt stop near near1 gfun pla (a:as) toMove (acs, mp) = do
     (d, p) <- interMove near near1 gfun a pla toMove mp
     let acts = (a, d) : acs
-        final = if d == Any then mp else M.insert p pla mp
+        final = case d of
+                  Any ds    -> mp
+                  otherwise -> M.insert p pla mp
     nextAnt stop near near1 gfun pla as toMove (acts, final)
 
 extend :: (Point -> [(Dir, Point)]) -> Point -> [(EDir, Point)]
@@ -84,13 +86,13 @@ extend f p = (Stay, p) : map (\(d, p') -> (Go d, p')) (f p)
 
 -- Filter all possible moves: must not go to a busy point and must be interesting
 interMove :: DstFun -> DstFun -> GenFun -> Point -> Int -> ToMove -> PoiMap -> [(EDir, Point)]
-interMove near near1 gfun a pla toMove pm = go [] $ extend gfun a
-    where go acc [] = if null acc then [(Any, a)] else acc
-          go acc (m@(_, p):ms) = case M.lookup p pm of
-             Just _  -> go acc ms
+interMove near near1 gfun a pla toMove pm = go [] [] $ extend gfun a
+    where go dcc acc [] = if null acc then dcc else (Any acc, a) : dcc
+          go dcc acc (m@(d, p):ms) = case M.lookup p pm of
+             Just _  -> go dcc acc ms
              Nothing -> if any (near1 p) tml || any (near p) cfl
-                           then go (m:acc) ms
-                           else go acc ms
+                           then go (m:dcc) acc ms
+                           else go dcc (d:acc) ms
           tml = concatMap snd $ filter ((/= pla) . fst) $ M.assocs toMove
           cfl = map fst $ filter ((/= pla) . snd) $ M.assocs pm
 

@@ -29,6 +29,7 @@ data MyState = MyState {
          stPlans   :: [(Point, Plan)],		-- accumulates plans
          stWeakEH  :: [(Point, (Int, Int))],	-- weakness of enemy hills
          stFrFood  :: Food,			-- still untargeted food
+         stLibGrad :: LibGrad,			-- which ant can move where
          stOurCnt  :: Int,			-- total count of our ants
          stCrtASt  :: Int			-- current astar searches
      }
@@ -46,6 +47,7 @@ type MyGame a = forall r. CPS r MyState IO a
 data Prio = Green | Yellow | Red deriving (Eq, Ord, Show)
 data Plan = Plan { plPrio :: Prio, plTarget :: Point, plPath :: [PathInfo], plWait :: Int } deriving Show
 type PlanMemo = M.Map Point Plan
+type LibGrad  = M.Map Point [EDir]
 
 -- Some constants and constant-like definitions:
 msReserve = 200		-- reserve time for answer back (ms)
@@ -88,7 +90,8 @@ doTurn gp gs = do
                    stPersist = npers { peEnHills = hi },
                    stUpper = snd b, stOrders = [], stPlans = [],
                    stOurCnt = length (ours gs), stWeakEH = attacs,
-                   stCrtASt = peMaxPASt npers, stFrFood = food gs -- `S.difference` tfood
+                   stLibGrad = M.empty, stCrtASt = peMaxPASt npers,
+                   stFrFood = food gs -- `S.difference` tfood
                }
       zoneRadius2 = hellSteps (attackradius2 gp) 2
       fzs = fightZones (near zoneRadius2 (snd b)) (ours gs) (ants gs) []
@@ -96,8 +99,8 @@ doTurn gp gs = do
   -- (orders, finst) <- runState (makeOrders $ ours gs) initst
   (fzs', st1) <- runState (fightAnts fzs) st0	-- first the fighting ants
   -- let ofree = myFreeAnts (ours gs) fzs'
-  let ofree = myFreeAnts (ours gs) fzs'
-  stf <- execState (freeAnts ofree) st1	-- then the free ants
+  -- let ofree = myFreeAnts (ours gs) fzs'
+  stf <- execState (freeAnts 1 (ours gs)) st1	-- then the free ants
   restTime <- timeRemaining gp gs
   let plans = M.fromList $ stPlans stf
       astpt = aStarNextTurn (peMaxPASt npers) restTime
@@ -129,16 +132,18 @@ cleanDeadPlans gs pe =
 
 -- Orders for the free ants (i.e. not fighting
 -- makeOrders :: [Point] -> MyGame [Order]
-freeAnts :: [Point] -> MyGame ()
-freeAnts [] = return ()
-freeAnts points = do
+freeAnts :: Int -> [Point] -> MyGame ()
+freeAnts _ [] = return ()
+freeAnts i points = do
   st <- get
   let gp = stPars  st
       gs = stState st
-  tr <- lift $ timeRemaining gp gs
-  when (tr > msReserve) $ do
+  tr <- if i `mod` 10 == 0	-- to avoid to take the time so often
+           then return msReserve
+           else lift $ timeRemaining gp gs
+  when (tr >= msReserve) $ do
       perAnt $ head points
-      freeAnts $ tail points
+      freeAnts (i+1) $ tail points
 
 -- Our ants not involved in any fight zone
 myFreeAnts :: [Point] -> [Point] -> [Point]
@@ -150,7 +155,7 @@ hellSteps ar x = ar + x*x + ceiling (2 * fromIntegral x * sqrt (fromIntegral ar)
 
 -- Orders for the fighting ants
 fightAnts fs
-    | null fs'  = return []
+    | null fs'  = return ()
     | otherwise = do
         st <- get
         let gp = stPars st
@@ -158,9 +163,8 @@ fightAnts fs
             ra1 = hellSteps (attackradius2 gp) 1
             nf  = near (attackradius2 gp) u
             nf1 = near ra1 u
-        fss <- mapM (perFightZone nf nf1) fs'
-        return $ concat $ fss ++ map fst fs''
-    where (fs', fs'') = partition (\(ps, tm) -> length ps + points tm <= zoneMax) fs
+        mapM_ (perFightZone nf nf1) fs'
+    where fs' = filter (\(ps, tm) -> length ps + points tm <= zoneMax) fs
           points tm = sum $ map length $ M.elems tm
 
 perFightZone nf nf1 fz@(us, themm) = do
@@ -172,22 +176,24 @@ perFightZone nf nf1 fz@(us, themm) = do
     let u  = stUpper st
         -- here are the parameter of the evaluation
         reg' = min 100 $ stOurCnt st
-        epar = EvalPars { pes = 10, opt = 10, reg = reg', tgt = Nothing }
+        epar = EvalPars { pes = 80, opt = 0, reg = reg', tgt = Nothing }
         (sco, cfs) = nextTurn nf nf1 (valDirs ibusy u) epar us themm
         oac = fst cfs
     debug $ "Fight zone: us = " ++ show us ++ ", them = " ++ show themm
     debug $ "Params: " ++ show epar ++ " score = " ++ show sco ++ "\nOur moves: " ++ show oac
-    used <- mapM extOrderMove oac
-    return $ catMaybes used
+    mapM_ extOrderMove oac
     where valDirs :: UArray Point Bool -> Point -> Point -> [(Dir, Point)]
           valDirs w u pt = filter (not . (w!) . snd) $ map (\d -> (d, move u pt d)) allDirs
 
-extOrderMove :: (Point, EDir) -> MyGame (Maybe Point)
+extOrderMove :: (Point, EDir) -> MyGame ()
 extOrderMove (pt, edir) = do
     case edir of
-        Go d -> orderMove pt d "fight" >> return (Just pt)
-        Stay -> markWait pt >> return (Just pt)
-        Any  -> return Nothing
+        Go d   -> orderMove pt d "fight" >> libGrad pt []
+        Stay   -> markWait pt >> libGrad pt []
+        Any ms -> libGrad pt ms
+
+libGrad :: Point -> [EDir] -> MyGame ()
+libGrad p es = modify $ \s -> s { stLibGrad = M.insert p es (stLibGrad s) }
 
 markWait pt = do
     st <- get
@@ -204,7 +210,9 @@ infixr 1 <|>
 perAnt :: Point -> MyGame Bool
 perAnt pt = do
     svs <- getValidDirs pt
-    getGoal pt svs
+    if not (fst svs) && null (snd svs)
+       then return True	-- it looks this one was already moved
+       else getGoal pt svs
 
 getGoal :: Point -> (Bool, [PathInfo]) -> MyGame Bool
 getGoal pt (bst, vs) =
@@ -299,7 +307,7 @@ toNearest pt pts maxl = do
     let u = stUpper st
         w = water . stState $ st
         ptsset = S.fromList pts
-    mpath <- liftIO $ aStar (validDirs w u) (listDistance u pts) pt (`S.member` ptsset) (Just maxl)
+    mpath <- liftIO $ aStar (validDirs w u allDirs) (listDistance u pts) pt (`S.member` ptsset) (Just maxl)
     modify $ \s -> s { stCrtASt = stCrtASt s - 1 }
     case mpath of
         Nothing    -> return Nothing
@@ -577,7 +585,7 @@ gotoPoint isFood pt to = do
   if mx <= 0
      then return False
      else do
-       mpath <- liftIO $ aStar (validDirs w u) (distance u to) pt (== to) Nothing
+       mpath <- liftIO $ aStar (validDirs w u allDirs) (distance u to) pt (== to) Nothing
        modify $ \s -> s { stCrtASt = mx - 1 }
        case mpath of
          Nothing    -> return False
@@ -589,17 +597,28 @@ gotoPoint isFood pt to = do
 
 -- Given a bitmap of "busy" points, and a source point, find
 -- the valid directions to move
-validDirs :: BitMap -> Point -> Point -> IO [PathInfo]
-validDirs w u pt = notWater w $ map (\d -> (d, move u pt d)) allDirs
+validDirs :: BitMap -> Point -> [Dir] -> Point -> IO [PathInfo]
+validDirs w u ds pt = notBitMap w $ map (\d -> (d, move u pt d)) ds
 
+-- Gets the valid dirs to move (or stay), considering busy cells
+-- and ants with less liberty grades (because they are
+-- part of a fight zone)
 getValidDirs :: Point -> MyGame (Bool, [PathInfo])
 getValidDirs pt = do
   st <- get
   let busy = stBusy st
       u = stUpper st
+      mfg = M.lookup pt (stLibGrad st)
+      (stp, ds) = maybe (True, allDirs) (edirToDirs False []) mfg
   bst <- liftIO $ readArray busy pt
-  pi  <- liftIO $ validDirs busy u pt
-  return (not bst, pi)
+  pi  <- liftIO $ validDirs busy u ds pt
+  return (not bst && stp, pi)
+  where edirToDirs bstay acc [] = (bstay, acc)
+        edirToDirs bstay acc (ed:eds)
+            = case ed of
+                  Stay -> edirToDirs True acc eds
+                  Go d -> edirToDirs bstay (d:acc) eds
+                  _    -> edirToDirs bstay acc eds
 
 -- Take a random (but not bad) direction
 moveRandom :: Point -> [PathInfo] -> MyGame Bool
@@ -722,8 +741,8 @@ filterBusy f as = do
     let busy = stBusy st
     lift $ filterM (\a -> liftM not $ readArray busy (f a)) as
 
-notWater :: BitMap -> [(a, Point)] -> IO [(a, Point)]
-notWater w = filterM (liftM not . readArray w . snd)
+notBitMap :: BitMap -> [(a, Point)] -> IO [(a, Point)]
+notBitMap w = filterM (liftM not . readArray w . snd)
 
 near r u a b = euclidSquare u a b <= r
 
