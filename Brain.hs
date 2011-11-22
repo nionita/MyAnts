@@ -59,6 +59,8 @@ attMajority = 2		-- used when attacking many to many
 maxPlanWait = 3		-- how long to wait in a plan when path is blocked
 checkEasyFood = 10	-- how often to check for easy food?
 zoneMax      = 9	-- max ants in a zone fight
+maxSmellPath = 50	-- max steps for smell blood paths
+stepsToBlood = 10	-- afterwhich we reconsider
 viewRadius   = (1*) . viewradius2	-- visibility radius
 foodRadius   = (1*) . const 100	-- in which we go to food
 homeRadius   = (1*) . const 100	-- in which we consider to be at home
@@ -175,7 +177,8 @@ perFightZone nf nf1 fz@(us, themm) = do
              unsafeFreeze busy
     let u  = stUpper st
         -- here are the parameter of the evaluation
-        reg' = min 100 $ stOurCnt st
+        c    = stOurCnt st
+        reg' = min 100 $ c * (2*c - 199) `div` 2	-- by 0 is 0, by 100 is 50, maximum is 100
         epar = EvalPars { pes = 10, opt = 0, reg = reg', tgt = Nothing }
         (sco, cfs) = nextTurn nf nf1 (valDirs ibusy u) epar us themm
         oac = fst cfs
@@ -363,12 +366,12 @@ smellBlood pt vs = do
   if mx <= 0 || null hots
      then return False
      else do
-        mth <- toNearest pt hots 30 -- maxim 20 steps
+        mth <- toNearest pt hots maxSmellPath
         case mth of
             Nothing          -> return False
             Just (ho, hpath) -> do
                 let hplan = Plan { plPrio = Green, plTarget = ho,
-                                   plPath = hpath, plWait = maxPlanWait }
+                                   plPath = take stepsToBlood hpath, plWait = maxPlanWait }
                 modify $ \s -> s { stHotSpots = delete ho hots }
                 executePlan pt hplan
 
