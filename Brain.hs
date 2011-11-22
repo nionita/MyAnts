@@ -30,6 +30,7 @@ data MyState = MyState {
          stWeakEH  :: [(Point, (Int, Int))],	-- weakness of enemy hills
          stFrFood  :: Food,			-- still untargeted food
          stLibGrad :: LibGrad,			-- which ant can move where
+         stHotSpots:: [Point],			-- battle centres
          stOurCnt  :: Int,			-- total count of our ants
          stCrtASt  :: Int			-- current astar searches
      }
@@ -51,7 +52,7 @@ type LibGrad  = M.Map Point [EDir]
 
 -- Some constants and constant-like definitions:
 msReserve = 200		-- reserve time for answer back (ms)
-msDecrAst = 400		-- under this time we decrese the AStar seraches per turn
+msDecrAst = 400		-- under this time we decrese the AStar searches per turn
 msIncrAst = 700		-- over this time we increse the AStar seraches per turn
 maxMaxASt = 80		-- maximum AStar searches per turn
 attMajority = 2		-- used when attacking many to many
@@ -91,15 +92,13 @@ doTurn gp gs = do
                    stUpper = snd b, stOrders = [], stPlans = [],
                    stOurCnt = length (ours gs), stWeakEH = attacs,
                    stLibGrad = M.empty, stCrtASt = peMaxPASt npers,
-                   stFrFood = food gs -- `S.difference` tfood
+                   stHotSpots = [], stFrFood = food gs -- `S.difference` tfood
                }
       zoneRadius2 = hellSteps (attackradius2 gp) 2
       fzs = fightZones (near zoneRadius2 (snd b)) (ours gs) (ants gs) []
   when (not $ null fzs) $ hPutStrLn stderr $ "Fight zones:\n" ++ show fzs
   -- (orders, finst) <- runState (makeOrders $ ours gs) initst
-  (fzs', st1) <- runState (fightAnts fzs) st0	-- first the fighting ants
-  -- let ofree = myFreeAnts (ours gs) fzs'
-  -- let ofree = myFreeAnts (ours gs) fzs'
+  st1 <- execState (fightAnts fzs) st0	-- first the fighting ants
   stf <- execState (freeAnts 1 (ours gs)) st1	-- then the free ants
   restTime <- timeRemaining gp gs
   let plans = M.fromList $ stPlans stf
@@ -164,6 +163,7 @@ fightAnts fs
             nf  = near (attackradius2 gp) u
             nf1 = near ra1 u
         mapM_ (perFightZone nf nf1) fs'
+        mapM_ makeHotSpot fs
     where fs' = filter (\(ps, tm) -> length ps + points tm <= zoneMax) fs
           points tm = sum $ map length $ M.elems tm
 
@@ -176,7 +176,7 @@ perFightZone nf nf1 fz@(us, themm) = do
     let u  = stUpper st
         -- here are the parameter of the evaluation
         reg' = min 100 $ stOurCnt st
-        epar = EvalPars { pes = 80, opt = 0, reg = reg', tgt = Nothing }
+        epar = EvalPars { pes = 10, opt = 0, reg = reg', tgt = Nothing }
         (sco, cfs) = nextTurn nf nf1 (valDirs ibusy u) epar us themm
         oac = fst cfs
     debug $ "Fight zone: us = " ++ show us ++ ", them = " ++ show themm
@@ -194,6 +194,11 @@ extOrderMove (pt, edir) = do
 
 libGrad :: Point -> [EDir] -> MyGame ()
 libGrad p es = modify $ \s -> s { stLibGrad = M.insert p es (stLibGrad s) }
+
+makeHotSpot (us, tm) = do
+    let pts = us ++ concat (M.elems tm)
+        gc = gravCenter pts
+    modify $ \s -> s { stHotSpots = gc : stHotSpots s }
 
 markWait pt = do
     st <- get
@@ -216,23 +221,14 @@ perAnt pt = do
 
 getGoal :: Point -> (Bool, [PathInfo]) -> MyGame Bool
 getGoal pt (bst, vs) =
-    -- blocked pt bst vs <|>
-    oneChoice pt bst vs <|>
-    immRaze pt vs <|>
-    -- danger pt vs <|>
-    pickFood pt vs <|>
-    followPlan pt vs <|>
-    razeAttac pt vs <|>
-    gotoFood pt vs <|>
-    rest pt vs
-
-{--
--- If blocked, wait
-blocked pt vs
-    = if null vs
-         then markWait pt
-         else return False
---}
+    oneChoice pt bst vs <|>	-- if we have only one choice, take it
+    immRaze pt vs <|>		-- if we can immediately raze a hill, do it
+    pickFood pt vs <|>		-- immediate food pick
+    followPlan pt vs <|>	-- follow a plan
+    razeAttac pt vs <|>		-- raze attack
+    smellBlood pt vs <|>	-- if there is some battle, go there
+    gotoFood pt vs <|>		-- find some food
+    rest pt vs			-- whatever...
 
 -- When we have only one choice, take it
 oneChoice :: Point -> Bool -> [PathInfo] -> MyGame Bool
@@ -311,10 +307,12 @@ toNearest pt pts maxl = do
     modify $ \s -> s { stCrtASt = stCrtASt s - 1 }
     case mpath of
         Nothing    -> return Nothing
-        Just path' -> do
-            let np = snd $ head path'
-                path = reverse path'
-            return $ Just (np, path)
+        Just path' -> if null path'
+            then return Nothing
+            else do
+              let np = snd $ head path'
+                  path = reverse path'
+              return $ Just (np, path)
     where listDistance u list p = minimum $ map (distance u p) list
 
 -- If we have a plan: execute it
@@ -355,6 +353,24 @@ razeAttac pt vs = do
                     -- debug $ "- Probs:  " ++ show attac ++ " <-> " ++ show retra
                     act <- choose [(attac, gotoPoint False pt h), (retra, return False)]
                     act
+
+-- If there is some battle, go there
+smellBlood :: Point -> [PathInfo] -> MyGame Bool
+smellBlood pt vs = do
+  st <- get
+  let mx   = stCrtASt st	-- we are limited by aStar searches
+      hots = stHotSpots st
+  if mx <= 0 || null hots
+     then return False
+     else do
+        mth <- toNearest pt hots 30 -- maxim 20 steps
+        case mth of
+            Nothing          -> return False
+            Just (ho, hpath) -> do
+                let hplan = Plan { plPrio = Green, plTarget = ho,
+                                   plPath = hpath, plWait = maxPlanWait }
+                modify $ \s -> s { stHotSpots = delete ho hots }
+                executePlan pt hplan
 
 -- Go to some free food, in some radius
 gotoFood :: Point -> [PathInfo] -> MyGame Bool
