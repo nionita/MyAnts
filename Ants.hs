@@ -156,7 +156,7 @@ finishTurn :: [Order] -> IO ()
 finishTurn ords = do
   putStrLn "go"
   hFlush stdout
-  -- hPutStrLn stderr "Orders"
+  -- hPutStrLn stderr "Orders:"
   -- mapM_ (hPutStrLn stderr . show) ords
   performGC
 
@@ -293,7 +293,6 @@ gameLoop gp gs doTurn = do
           B.hPutStrLn stderr line
           gs1 <- updateGame gp gs
           (orders, gs2) <- doTurn gp gs1
-          -- hPutStrLn stderr $ show orders
           mapM_ issueOrder orders
           finishTurn orders
           gameLoop gp gs2 doTurn

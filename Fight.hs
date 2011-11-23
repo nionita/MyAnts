@@ -24,8 +24,8 @@ type PoiMap = M.Map Point Int		-- which players ant is in that point
 type Config = ([Action], PoiMap)	-- actions and resulting distribution
 
 data EvalPars = EvalPars {
-                    pes :: Int,		-- weight of the worst case
-                    opt :: Int,		-- weight of the best case (100-pes-opt=weight of avg)
+                    pes :: Float,	-- weight of the worst case
+                    opt :: Float,	-- weight of the best case (100-pes-opt=weight of avg)
                     reg :: Int,		-- weight of enemy ants (100-reg=weight of ours)
                     tgt :: Maybe Point	-- target: we will move to this point
                 } deriving Show
@@ -39,23 +39,23 @@ data EvalPars = EvalPars {
 --              | i >  mx = getMaxs (i, [c]) cis
 --              | i == mx = getMaxs (mx, c:cs) cis
 --              | i <  mx = getMaxs acc cis
-nextTurn :: DstFun -> DstFun -> GenFun -> EvalPars -> [Point] -> ToMove -> (Int, Config)
+nextTurn :: DstFun -> DstFun -> GenFun -> EvalPars -> [Point] -> ToMove -> (Float, Config)
 nextTurn near near1 gfun epar us toMove
-    = getMaxs (minBound, c0) $ ourMoves near near1 gfun epar us toMove
+    = getMaxs cf cfs
     where getMaxs !acc [] = acc
-          getMaxs !acc@(!mx, cs) ((c, i) : cis)
+          getMaxs !acc@(!mx, cs) ((i, c) : cis)
               | i >  mx   = getMaxs (i, c) cis
               -- | i == mx   = getMaxs (i, c) cis
               | otherwise = getMaxs acc cis
-          c0 = ([], M.empty)
+          (cf:cfs) = ourMoves near near1 gfun epar us toMove
 
 -- Evaluate every of our moves with the average of the possible answers
-ourMoves :: DstFun -> DstFun -> GenFun -> EvalPars -> [Point] -> ToMove -> [(Config, Int)]
+ourMoves :: DstFun -> DstFun -> GenFun -> EvalPars -> [Point] -> ToMove -> [(Float, Config)]
 ourMoves near near1 gfun epar us toMove = do
     myc <- nextAnt True near near1 gfun 0 us toMove ([], M.empty)
     let ocfs = nextPlayer near near1 gfun toMove myc
         avg  = average (pes epar) (opt epar) $ map (evalOutcome near epar . snd) ocfs
-    return (myc, avg)
+    return (avg, myc)
 
 -- Choose next player to move
 nextPlayer :: DstFun -> DstFun -> GenFun -> ToMove -> Config -> [Config]
@@ -183,10 +183,9 @@ restOursAnts pps = (us, them)
     where us = map snd $ filter ((==0) . fst) $ S.toList pps
           them = filter ((/=0) . fst) $ S.toList pps
 
-average :: Int -> Int -> [Int] -> Int
-average pes opt xs = go (0, 0, maxBound, minBound) xs
-    where go (!s, !c, !mi, !ma) []     = if c == 0
-                                            then 0
-                                            else (mi * pes + (s * av `div` c) + ma * opt) `div` 100
-          go (!s, !c, !mi, !ma) (x:xs) = go (s+x, c+1, min mi x, max ma x) xs
+average :: Float -> Float -> [Int] -> Float
+average pes opt xs = go (0, 0, 1000000, -1000000) xs
+    where go (!s, !c, !mi, !ma) []     = (mi * pes + (s * av / c) + ma * opt) / 100
+          go (!s, !c, !mi, !ma) (x:xs) = let y = fromIntegral x
+                                         in  go (s+y, c+1, min mi y, max ma y) xs
           av = 100 - pes - opt

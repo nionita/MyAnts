@@ -32,7 +32,9 @@ data MyState = MyState {
          stLibGrad :: LibGrad,			-- which ant can move where
          stHotSpots:: [Point],			-- battle centres
          stOurCnt  :: Int,			-- total count of our ants
-         stCrtASt  :: Int			-- current astar searches
+         stCrtASt  :: Int,			-- current astar searches
+         stCanStay :: Bool,			-- current ant can wait?
+         stValDirs :: [PathInfo]		-- valid directions for current ant
      }
 
 data Persist = Persist {
@@ -46,7 +48,13 @@ type MyGame a = forall r. CPS r MyState IO a
 
 -- Plans we calculate and must remember: priority, target and path
 data Prio = Green | Yellow | Red deriving (Eq, Ord, Show)
-data Plan = Plan { plPrio :: Prio, plTarget :: Point, plPath :: [PathInfo], plWait :: Int } deriving Show
+data Plan = Plan {
+                plPrio :: Prio,
+                plTarget :: !Point,
+                plPath :: ![PathInfo],
+                plPLen :: !Int,
+                plWait :: !Int
+            } deriving Show
 type PlanMemo = M.Map Point Plan
 type LibGrad  = M.Map Point [EDir]
 
@@ -94,7 +102,8 @@ doTurn gp gs = do
                    stUpper = snd b, stOrders = [], stPlans = [],
                    stOurCnt = length (ours gs), stWeakEH = attacs,
                    stLibGrad = M.empty, stCrtASt = peMaxPASt npers,
-                   stHotSpots = [], stFrFood = food gs -- `S.difference` tfood
+                   stHotSpots = [], stFrFood = food gs, -- `S.difference` tfood
+                   stCanStay = True, stValDirs = []
                }
       zoneRadius2 = hellSteps (attackradius2 gp) 2
       fzs = fightZones (near zoneRadius2 (snd b)) (ours gs) (ants gs) []
@@ -178,7 +187,7 @@ perFightZone nf nf1 fz@(us, themm) = do
     let u  = stUpper st
         -- here are the parameter of the evaluation
         c    = stOurCnt st
-        reg' = min 100 $ c * (2*c - 199) `div` 2	-- by 0 is 0, by 100 is 50, maximum is 100
+        reg' = min 100 $ c * c `div` 200	-- by 0 is 0, by 100 is 50, maximum is 100
         epar = EvalPars { pes = 10, opt = 0, reg = reg', tgt = Nothing }
         (sco, cfs) = nextTurn nf nf1 (valDirs ibusy u) epar us themm
         oac = fst cfs
@@ -220,33 +229,36 @@ perAnt pt = do
     svs <- getValidDirs pt
     if not (fst svs) && null (snd svs)
        then return True	-- it looks this one was already moved
-       else getGoal pt svs
+       else do
+           modify $ \s -> s { stCanStay = fst svs, stValDirs = snd svs }
+           getGoal pt
 
-getGoal :: Point -> (Bool, [PathInfo]) -> MyGame Bool
-getGoal pt (bst, vs) =
-    oneChoice pt bst vs <|>	-- if we have only one choice, take it
-    immRaze pt vs <|>		-- if we can immediately raze a hill, do it
-    pickFood pt vs <|>		-- immediate food pick
-    followPlan pt vs <|>	-- follow a plan
-    razeAttac pt vs <|>		-- raze attack
-    smellBlood pt vs <|>	-- if there is some battle, go there
-    gotoFood pt vs <|>		-- find some food
-    rest pt vs			-- whatever...
+getGoal :: Point -> MyGame Bool
+getGoal pt =
+    oneChoice pt <|>	-- if we have only one choice, take it
+    immRaze pt <|>	-- if we can immediately raze a hill, do it
+    pickFood pt <|>	-- immediate food pick
+    followPlan pt <|>	-- follow a plan
+    razeAttac pt <|>	-- raze attack
+    smellBlood pt <|>	-- if there is some battle, go there
+    gotoFood pt <|>	-- find some food
+    rest pt		-- whatever...
 
 -- When we have only one choice, take it
-oneChoice :: Point -> Bool -> [PathInfo] -> MyGame Bool
-oneChoice pt bst vs =
-    if bst
-       then if null vs
+oneChoice :: Point -> MyGame Bool
+oneChoice pt = do
+    st <- get
+    if stCanStay st
+       then if null $ stValDirs st
                then markWait pt	-- we can only wait
                else return False
-       else case vs of
+       else case stValDirs st of
                 [(d, _)] -> orderMove pt d "oneChoice"	-- the only possibility
                 _        -> return False
 
 -- When we can raze some hill not defended: do it!
-immRaze :: Point -> [PathInfo] -> MyGame Bool
-immRaze pt _ = do
+immRaze :: Point -> MyGame Bool
+immRaze pt = do
     mhr <- hillToRaze pt viewRadius
     case mhr of
         Nothing     -> return False
@@ -258,29 +270,15 @@ immRaze pt _ = do
                then gotoPoint False pt h
                else return False
 
--- When we face other ants, we have to take care!
-danger :: Point -> [PathInfo] -> MyGame Bool
-danger pt vs = do
-    as <- antsInZone False pt
-    case length as of
-      0 -> return False	-- no danger
-      1 -> toOneAtHome  pt as vs <|> toOneAway pt as
-      _ -> dangerAtHome pt as vs <|> dangerAway  pt as vs
-
 -- If we stay near a food square: wait one turn to pick it
-pickFood :: Point -> [PathInfo] -> MyGame Bool
-pickFood pt vs = do
+pickFood :: Point -> MyGame Bool
+pickFood pt = do
   food <- gets $ food . stState
-  let foods = getFoods food $ map snd vs
+  fs   <- foodPoints pt
+  let foods = getFoods food fs
   if null foods
      then return False
-     else do
-         mustMove <- isBusy pt
-         if mustMove
-            then return False
-            else do
-               deleteTargets foods
-               replicatePlan pt
+     else canStay (deleteTargets foods >> replicatePlan pt) (return False)
 
 -- If we are very near to a food: try to pick it
 easyFood :: Point -> Int -> MyGame (Maybe (Point, [PathInfo]))
@@ -319,27 +317,39 @@ toNearest pt pts maxl = do
     where listDistance u list p = minimum $ map (distance u p) list
 
 -- If we have a plan: execute it
-followPlan :: Point -> [PathInfo] -> MyGame Bool
-followPlan pt vs = do
+-- But take care if the path is secure, i.e. the first step is allowed
+-- Also if there is some easy food, try to take it (sometimes)
+followPlan :: Point -> MyGame Bool
+followPlan pt = do
     mplan <- getOldPlan pt
     case mplan of
         Nothing   -> return False	-- no plan
         Just plan -> do
-            let lpl = length (plPath plan)
-            measy <- if lpl `mod` checkEasyFood == 0	-- do we have an easy food?
-                        then easyFood pt lpl		-- check only now and then
-                        else return Nothing
-            case measy of
-                Nothing          -> executePlan pt plan
-                Just (fo, fpath) -> do
-                    let lfo = length fpath
-                        fplan = Plan { plPrio = Green, plTarget = fo, plPath = fpath, plWait = 0 }
-                    act <- choose [(lfo, executePlan pt plan), (lpl, executePlan pt fplan)]
-                    act
+            vs <- gets stValDirs
+            let pp = plPath plan
+            if null pp || not (head pp `elem` vs)
+               then return False	-- path is empty or first step not allowed
+               else do
+                 measy <- if (plPLen plan) `mod` checkEasyFood == 0	-- do we have an easy food?
+                             then easyFood pt (plPLen plan)		-- check only now and then
+                             else return Nothing
+                 case measy of
+                     Nothing          -> executePlan pt plan
+                     Just (fo, fpath) -> if (head fpath `elem` vs)
+                         then do
+                             let lfo = length fpath
+                                 fplan = Plan { plPrio = Green, plTarget = fo, plPath = fpath,
+                                                plPLen = lfo, plWait = 0 }
+                             act <- choose [
+                                        (lfo, executePlan pt plan),
+                                        (plPLen plan, executePlan pt fplan)
+                                    ]
+                             act
+                         else executePlan pt plan
 
 -- How to attack and raze an enemy hill
-razeAttac :: Point -> [PathInfo] -> MyGame Bool
-razeAttac pt vs = do
+razeAttac :: Point -> MyGame Bool
+razeAttac pt = do
     mhr <- hillToRaze pt razeRadius
     case mhr of
         Nothing     -> return False
@@ -354,12 +364,13 @@ razeAttac pt vs = do
                     -- debug $ "- Params: "
                     --         ++ concat (intersperse " / " (map show [x, us, them, weall]))
                     -- debug $ "- Probs:  " ++ show attac ++ " <-> " ++ show retra
+                    -- Here we don't check for valid moves - is it ok?
                     act <- choose [(attac, gotoPoint False pt h), (retra, return False)]
                     act
 
 -- If there is some battle, go there
-smellBlood :: Point -> [PathInfo] -> MyGame Bool
-smellBlood pt vs = do
+smellBlood :: Point -> MyGame Bool
+smellBlood pt = do
   st <- get
   let mx   = stCrtASt st	-- we are limited by aStar searches
       hots = stHotSpots st
@@ -371,13 +382,15 @@ smellBlood pt vs = do
             Nothing          -> return False
             Just (ho, hpath) -> do
                 let hplan = Plan { plPrio = Green, plTarget = ho,
-                                   plPath = take stepsToBlood hpath, plWait = maxPlanWait }
+                                   plPath = plp, plPLen = length plp,
+                                   plWait = maxPlanWait }
+                    plp = take stepsToBlood hpath
                 modify $ \s -> s { stHotSpots = delete ho hots }
                 executePlan pt hplan
 
 -- Go to some free food, in some radius
-gotoFood :: Point -> [PathInfo] -> MyGame Bool
-gotoFood pt vs = do
+gotoFood :: Point -> MyGame Bool
+gotoFood pt = do
   st <- get
   let frf = stFrFood st
   if S.null frf
@@ -391,64 +404,11 @@ gotoFood pt vs = do
          takeFirst (gotoPoint True pt) $ map fst foods
 
 -- When boring:
-rest pt vs = do
-    act <- choose [(2, maiRar pt), (3, explore pt vs), (1, moveRandom pt vs)]
+rest pt = do
+    act <- choose [(2, maiRar pt), (3, explore pt), (1, moveRandom pt)]
     act
 
 -- Fight section
--- When we fight to only one at home we have to be carefull
-toOneAtHome :: Point -> [Point] -> [PathInfo] -> MyGame Bool
-toOneAtHome _ [] _   = return False
-toOneAtHome pt as vs = do
-    hz <- inHomeZone pt
-    case hz of
-      Nothing -> return False	-- not at home
-      Just h  -> do
-          os <- antsInZone True pt
-          case length os of
-            1 -> stayNearHome pt h vs
-            2 -> stayNearHome pt h vs
-            _ -> attackManyToOne pt os $ head as
-
-toOneAway :: Point -> [Point] -> MyGame Bool
-toOneAway _ []  = return False
-toOneAway pt as = do
-    os <- antsInZone True pt
-    case length os of
-      1 -> return False	-- be what it be
-      _ -> attackManyToOne pt os $ head as
-
--- When we are at least 2 to 1:
--- if we are the nearest: stay out of attack zone until at least one friend is at same distance
--- if we are the second or third nearest: go to enemy
--- if we are not one of the nearest 3, forget it
-attackManyToOne :: Point -> [Point] -> Point -> MyGame Bool
-attackManyToOne pt os en = do
-    st <- get
-    let u = stUpper st
-        as = take 3 $ sortByDist id u en (pt : os)
-    if length as == 2	-- can be only 2 or 3
-       then do
-           let [(fsp, fsx), (sep, sex)] = as
-           if pt /= fsp || fsx == sex
-              then gotoPoint False pt en
-              else return False
-       else do
-           let [(fsp, fsx), (sep, sex), (thp, thx)] = as
-           if pt `elem` [fsp, sep, thp]
-              then if pt /= fsp || fsx == sex
-                      then gotoPoint False pt en
-                      else return False
-              else return False
-
-attackManyToMany :: Point -> [Point] -> [Point] -> MyGame Bool
-attackManyToMany pt os as = do
-    let diff = length os + 1 - length as
-    if diff < attMajority
-       then moveFromList pt as
-       else if diff == attMajority
-            then return False	-- or: moveRandom pt vs
-            else moveToList pt as
 
 moveToList :: Point -> [Point] -> MyGame Bool
 moveToList pt as = do
@@ -492,18 +452,9 @@ inHomeZone pt = do
              then return $ Just h
              else return Nothing
 
-dangerAtHome :: Point -> [Point] -> [PathInfo] -> MyGame Bool
-dangerAtHome pt as vs = do
-    hz <- inHomeZone pt
-    case hz of
-      Nothing -> return False
-      Just h  -> do
-          act <- choose [(1, stayNearHome pt h vs), (1, dangerAway pt as vs)]
-          act
-
 -- Keep close to home
 stayNearHome :: Point -> Point -> [PathInfo] -> MyGame Bool
-stayNearHome pt h vs = if pt == h then moveRandom pt vs else moveTo True pt h
+stayNearHome pt h vs = if pt == h then moveRandom pt else moveTo True pt h
 
 -- Move to or from a point if the direction not busy (else wait)
 moveTo :: Bool -> Point -> Point -> MyGame Bool
@@ -515,6 +466,7 @@ moveTo towards pt to = do
     if b then markWait pt
          else orderMove pt d "moveTo"
 
+{--
 -- If we are more: attack!
 dangerAway :: Point -> [Point] -> [PathInfo] -> MyGame Bool
 dangerAway pt as vs = do
@@ -523,19 +475,6 @@ dangerAway pt as vs = do
       1 -> dangerAlone pt as vs
       _ -> attackManyToMany pt os as
 
-dangerAlone :: Point -> [Point] -> [PathInfo] -> MyGame Bool
-dangerAlone pt as vs = do
-    st <- get
-    let u = stUpper st
-        gp = stPars st
-        gs = stState st
-        as' = sortByDist id u pt as
-        xs  = take 2 $ inRadius2 fst (kamikaRadius gp) u pt as'
-    case length xs of
-      0 -> runAway pt $ map fst as'
-      1 -> attackIt pt (fst $ head xs)
-      2 -> attackOne pt xs vs
-
 -- We are alone against many: run!
 runAway :: Point -> [Point] -> MyGame Bool
 runAway pt as = moveFromList pt $ take 3 as
@@ -543,6 +482,7 @@ runAway pt as = moveFromList pt $ take 3 as
 attackIt = moveTo True
 
 attackOne pt _ = moveRandom pt
+--}
 
 hillToRaze :: Point -> (GameParams -> Int) -> MyGame (Maybe (Point, Int))
 hillToRaze pt rf = do
@@ -610,7 +550,8 @@ gotoPoint isFood pt to = do
          Nothing    -> return False
          Just path' -> do
            let path = reverse path'
-               plan = Plan { plPrio = Green, plTarget = to, plPath = path, plWait = maxPlanWait }
+               plan = Plan { plPrio = Green, plTarget = to, plPath = path,
+                             plPLen = length path, plWait = maxPlanWait }
            -- when isFood $ modify $ \s -> s { stFrFood = S.delete to (stFrFood s) }
            executePlan pt plan
 
@@ -618,6 +559,14 @@ gotoPoint isFood pt to = do
 -- the valid directions to move
 validDirs :: BitMap -> Point -> [Dir] -> Point -> IO [PathInfo]
 validDirs w u ds pt = notBitMap w $ map (\d -> (d, move u pt d)) ds
+
+-- Given a point, give the neighbour points, where we could find food
+-- We don't even check for water, as food will for sure not be there
+foodPoints :: Point -> MyGame [Point]
+foodPoints pt = do
+    st <- get
+    let u = stUpper st
+    return $ map (\d -> move u pt d) allDirs
 
 -- Gets the valid dirs to move (or stay), considering busy cells
 -- and ants with less liberty grades (because they are
@@ -640,14 +589,15 @@ getValidDirs pt = do
                   _    -> edirToDirs bstay acc eds
 
 -- Take a random (but not bad) direction
-moveRandom :: Point -> [PathInfo] -> MyGame Bool
-moveRandom pt vs = do
+moveRandom :: Point -> MyGame Bool
+moveRandom pt = do
+  vs <- gets stValDirs
   case vs of
     []  -> return False		-- should not come here
     [(d, _)] -> orderMove pt d "random"
     _   -> do
-      mustMove <- isBusy pt
-      let low = if mustMove then 1 else 0
+      cst <- gets stCanStay
+      let low = if cst then 0 else 1
       r <- liftIO $ randomRIO (low, length vs)
       if r == 0
          then markWait pt	-- means: wait
@@ -660,8 +610,9 @@ maiRar pt = do
        then return False
        else moveFromList pt os
 
-explore :: Point -> [PathInfo] -> MyGame Bool
-explore pt vs = do
+explore :: Point -> MyGame Bool
+explore pt = do
+  vs <- gets stValDirs
   case vs of
     []       -> return False		-- should not come here
     [(d, _)] -> orderMove pt d "explore"
@@ -699,17 +650,18 @@ orderMove p d lo = do
 executePlan :: Point -> Plan -> MyGame Bool
 executePlan pt plan | null (plPath plan) = return False
 executePlan pt plan = do
-    let ((d, p) : path) = plPath plan
+    let (dp@(d, p) : path) = plPath plan
     w <- isWater p
     if w
        then return False
        else do
-           b <- isBusy p
-           if b
-              then do
-                  mustMove <- isBusy pt
-                  if mustMove
-                     then return False
+           b  <- isBusy p
+           vs <- gets stValDirs
+           if b || not (dp `elem` vs)
+              then do	-- we cannot (yet) move to follow the plan
+                  cst <- gets stCanStay
+                  if not cst
+                     then return False	-- we cannot wait, cannot move - abort the plan
                      else do
                          act <- choose [
                              (1, return False),
@@ -718,7 +670,7 @@ executePlan pt plan = do
                              ]
                          act
               else do
-                  newPlan p plan { plPath = path, plWait = maxPlanWait }
+                  newPlan p plan { plPath = path, plPLen = plPLen plan - 1, plWait = maxPlanWait }
                   orderMove pt d "execPlan"
 
 deleteTargets :: [Point] -> MyGame ()
@@ -751,6 +703,11 @@ isBitMap f p = do
 isWater = isBitMap (water . stState)
 
 isBusy = isBitMap stBusy
+
+canStay :: MyGame Bool -> MyGame Bool -> MyGame Bool
+canStay ifYes ifNo = do
+    cs <- gets stCanStay
+    if cs then ifYes else ifNo
 
 seenPoint = isBitMap (peSeen . stPersist)
 
