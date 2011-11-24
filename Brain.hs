@@ -59,21 +59,21 @@ type PlanMemo = M.Map Point Plan
 type LibGrad  = M.Map Point [EDir]
 
 -- Some constants and constant-like definitions:
-msReserve = 200		-- reserve time for answer back (ms)
-msDecrAst = 400		-- under this time we decrese the AStar searches per turn
-msIncrAst = 700		-- over this time we increse the AStar seraches per turn
-maxMaxASt = 80		-- maximum AStar searches per turn
+msReserve = 150		-- reserve time for answer back (ms)
+msDecrAst = 300		-- under this time we decrese the AStar searches per turn
+msIncrAst = 650		-- over this time we increse the AStar seraches per turn
+maxMaxASt = 70		-- maximum AStar searches per turn
 attMajority = 2		-- used when attacking many to many
 maxPlanWait = 3		-- how long to wait in a plan when path is blocked
 checkEasyFood = 10	-- how often to check for easy food?
 zoneMax      = 9	-- max ants in a zone fight
-maxSmellPath = 50	-- max steps for smell blood paths
+maxSmellPath = 60	-- max steps for smell blood paths
+cntLastAttack = 200	-- when we are so many, go to last attack
 stepsToBlood = 10	-- afterwhich we reconsider
 viewRadius   = (1*) . viewradius2	-- visibility radius
 foodRadius   = (1*) . const 100	-- in which we go to food
 homeRadius   = (1*) . const 100	-- in which we consider to be at home
 razeRadius   =        const 1900	-- in which we consider to raze enemy hills
--- dangerRadius = (2*) . attackradius2	-- in which we are in danger
 dangerRadius = (1*) . attackradius2	-- in which we are in danger
 kamikaRadius = (1*) . attackradius2	-- we try a one to one fight (as we die anyway)
 
@@ -107,8 +107,7 @@ doTurn gp gs = do
                }
       zoneRadius2 = hellSteps (attackradius2 gp) 2
       fzs = fightZones (near zoneRadius2 (snd b)) (ours gs) (ants gs) []
-  when (not $ null fzs) $ hPutStrLn stderr $ "Fight zones:\n" ++ show fzs
-  -- (orders, finst) <- runState (makeOrders $ ours gs) initst
+  -- when (not $ null fzs) $ hPutStrLn stderr $ "Fight zones:\n" ++ show fzs
   st1 <- execState (fightAnts fzs) st0	-- first the fighting ants
   stf <- execState (freeAnts 1 (ours gs)) st1	-- then the free ants
   restTime <- timeRemaining gp gs
@@ -174,21 +173,25 @@ fightAnts fs
             nf  = near (attackradius2 gp) u
             nf1 = near ra1 u
         mapM_ (perFightZone nf nf1) fs'
-        mapM_ makeHotSpot fs
     where fs' = filter (\(ps, tm) -> length ps + points tm <= zoneMax) fs
           points tm = sum $ map length $ M.elems tm
 
 perFightZone nf nf1 fz@(us, themm) = do
+    ho <- makeHotSpot fz
     st <- get
     ibusy <- liftIO $ do
              busy <- mapArray id (stBusy st)
              forM_ us $ \p -> writeArray busy p False
              unsafeFreeze busy
-    let u  = stUpper st
+    let u   = stUpper st
+        gp  = stPars st
+        gs  = stState st
+        nhills = inRadius2 fst (homeRadius gp) u ho $ hills gs
         -- here are the parameter of the evaluation
         c    = stOurCnt st
         reg' = min 100 $ c * c `div` 200	-- by 0 is 0, by 100 is 50, maximum is 100
-        epar = EvalPars { pes = 10, opt = 0, reg = reg', tgt = Nothing }
+        pes' = if null nhills then 70 else 20
+        epar = EvalPars { pes = pes', opt = 0, reg = reg', tgt = Nothing }
         (sco, cfs) = nextTurn nf nf1 (valDirs ibusy u) epar us themm
         oac = fst cfs
     debug $ "Fight zone: us = " ++ show us ++ ", them = " ++ show themm
@@ -211,6 +214,7 @@ makeHotSpot (us, tm) = do
     let pts = us ++ concat (M.elems tm)
         gc = gravCenter pts
     modify $ \s -> s { stHotSpots = gc : stHotSpots s }
+    return gc
 
 markWait pt = do
     st <- get
@@ -385,7 +389,14 @@ smellBlood pt = do
                                    plPath = plp, plPLen = length plp,
                                    plWait = maxPlanWait }
                     plp = take stepsToBlood hpath
-                modify $ \s -> s { stHotSpots = delete ho hots }
+                    gp  = stPars st
+                    gs  = stState st
+                    u   = stUpper st
+                    cnt = stOurCnt st
+                    nhills = inRadius2 fst (homeRadius gp) u ho $ hills gs
+                -- when the hotspot is near some hill, do not delete it, so more ants are comming
+                when (null nhills && cnt < cntLastAttack) $
+                     modify $ \s -> s { stHotSpots = delete ho hots }
                 executePlan pt hplan
 
 -- Go to some free food, in some radius
@@ -405,7 +416,7 @@ gotoFood pt = do
 
 -- When boring:
 rest pt = do
-    act <- choose [(2, maiRar pt), (3, explore pt), (1, moveRandom pt)]
+    act <- choose [(1, maiRar pt), (3, explore pt), (7, moveRandom pt)]
     act
 
 -- Fight section
