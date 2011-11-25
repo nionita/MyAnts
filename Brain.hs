@@ -106,7 +106,7 @@ doTurn gp gs = do
                    stCanStay = True, stValDirs = []
                }
       zoneRadius2 = hellSteps (attackradius2 gp) 2
-      fzs = fightZones (near zoneRadius2 (snd b)) (ours gs) (ants gs) []
+      fzs = fightZones (snd b) zoneRadius2 (ours gs) (ants gs) []
   -- when (not $ null fzs) $ hPutStrLn stderr $ "Fight zones:\n" ++ show fzs
   st1 <- execState (fightAnts fzs) st0	-- first the fighting ants
   stf <- execState (freeAnts 1 (ours gs)) st1	-- then the free ants
@@ -169,14 +169,12 @@ fightAnts fs
         st <- get
         let gp = stPars st
             u  = stUpper st
-            ra1 = hellSteps (attackradius2 gp) 1
-            nf  = near (attackradius2 gp) u
-            nf1 = near ra1 u
-        mapM_ (perFightZone nf nf1) fs'
+            r1 = hellSteps (attackradius2 gp) 1
+            r0  = attackradius2 gp
+        mapM_ (perFightZone r0 r1) fs'
     where fs' = filter (\(ps, tm) -> length ps + points tm <= zoneMax) fs
-          points tm = sum $ map length $ M.elems tm
 
-perFightZone nf nf1 fz@(us, themm) = do
+perFightZone r0 r1 fz@(us, themm) = do
     ho <- makeHotSpot fz
     st <- get
     ibusy <- liftIO $ do
@@ -184,21 +182,32 @@ perFightZone nf nf1 fz@(us, themm) = do
              forM_ us $ \p -> writeArray busy p False
              unsafeFreeze busy
     let u   = stUpper st
-        gp  = stPars st
-        gs  = stState st
-        nhills = inRadius2 fst (homeRadius gp) u ho $ hills gs
         -- here are the parameter of the evaluation
-        c    = stOurCnt st
-        reg' = min 100 $ c * c `div` 200	-- by 0 is 0, by 100 is 50, maximum is 100
-        pes' = if null nhills then 70 else 20
-        epar = EvalPars { pes = pes', opt = 0, reg = reg', tgt = Nothing }
-        (sco, cfs) = nextTurn nf nf1 (valDirs ibusy u) epar us themm
+        epar = fightParams st fz
+        (sco, cfs) = nextTurn u r0 r1 (valDirs ibusy u) epar us themm
         oac = fst cfs
     debug $ "Fight zone: us = " ++ show us ++ ", them = " ++ show themm
     debug $ "Params: " ++ show epar ++ " score = " ++ show sco ++ "\nOur moves: " ++ show oac
     mapM_ extOrderMove oac
     where valDirs :: UArray Point Bool -> Point -> Point -> [(Dir, Point)]
           valDirs w u pt = filter (not . (w!) . snd) $ map (\d -> (d, move u pt d)) allDirs
+
+points tm = sum $ map length $ M.elems tm
+
+fightParams st fz@(us, themm) = EvalPars { pes = pes', opt = 0, reg = reg',
+                                           agr = agr', tgt = Nothing }
+    where u   = stUpper st
+          gp  = stPars st
+          gs  = stState st
+          c   = stOurCnt st
+          ho  = hotSpot fz
+          nhills = inRadius2 fst (homeRadius gp) u ho $ hills gs
+          usl  = length us
+          thl  = points themm
+          maj  = usl - thl
+          reg' = min 100 $ c * c `div` 200	-- by 0 is 0, by 100 is 50, maximum is 100
+          agr' = maj >= 1
+          pes' = if null nhills then 70 else 20
 
 extOrderMove :: (Point, EDir) -> MyGame ()
 extOrderMove (pt, edir) = do
@@ -210,9 +219,10 @@ extOrderMove (pt, edir) = do
 libGrad :: Point -> [EDir] -> MyGame ()
 libGrad p es = modify $ \s -> s { stLibGrad = M.insert p es (stLibGrad s) }
 
-makeHotSpot (us, tm) = do
-    let pts = us ++ concat (M.elems tm)
-        gc = gravCenter pts
+hotSpot (us, tm) = gravCenter $ us ++ concat (M.elems tm)
+
+makeHotSpot fz = do
+    let gc = hotSpot fz
     modify $ \s -> s { stHotSpots = gc : stHotSpots s }
     return gc
 
@@ -430,12 +440,6 @@ moveFromList :: Point -> [Point] -> MyGame Bool
 moveFromList pt as = do
     let gc = gravCenter as
     moveTo False pt gc
-
--- It must have at least one point!
-gravCenter :: [Point] -> Point
-gravCenter ps = (x `div` c, y `div` c)
-    where ((x, y), c) = foldl' f ((0, 0), 0) ps
-          f ((x, y), c) (xc, yc) = ((x + xc, y + yc), c + 1)
 
 -- The enemy ants we have around us
 antsInZone :: Bool -> Point -> MyGame [Point]
@@ -730,8 +734,6 @@ filterBusy f as = do
 
 notBitMap :: BitMap -> [(a, Point)] -> IO [(a, Point)]
 notBitMap w = filterM (liftM not . readArray w . snd)
-
-near r u a b = euclidSquare u a b <= r
 
 debug :: String -> MyGame ()
 -- debug s = liftIO $ hPutStrLn stderr s

@@ -22,40 +22,43 @@ type DstFun = Point -> Point -> Bool	-- to tell if 2 points are "near"
 type ToMove = M.Map Int [Point]		-- yet to move players/ants
 type PoiMap = M.Map Point Int		-- which players ant is in that point
 type Config = ([Action], PoiMap)	-- actions and resulting distribution
+type FPoint = (Float, Float)
 
 data EvalPars = EvalPars {
                     pes :: Float,	-- weight of the worst case
                     opt :: Float,	-- weight of the best case (100-pes-opt=weight of avg)
                     reg :: Int,		-- weight of enemy ants (100-reg=weight of ours)
+                    agr :: Bool,	-- agressiv moves preferred
                     tgt :: Maybe Point	-- target: we will move to this point
                 } deriving Show
 
 -- This function calculates the best final configurations (and the moves
 -- needed to reach them) per fight area
--- nextTurn :: DstFun -> GenFun -> (Int, Int) -> [Point] -> ToMove -> (Int, [Config])
--- nextTurn near gfun peso us toMove = getMaxs (minBound, []) $ ourMoves near gfun peso us toMove
---    where getMaxs acc [] = acc
---          getMaxs acc@(mx, cs) ((c, i) : cis)
---              | i >  mx = getMaxs (i, [c]) cis
---              | i == mx = getMaxs (mx, c:cs) cis
---              | i <  mx = getMaxs acc cis
-nextTurn :: DstFun -> DstFun -> GenFun -> EvalPars -> [Point] -> ToMove -> (Float, Config)
-nextTurn near near1 gfun epar us toMove
-    = getMaxs cf cfs
+nextTurn :: Point -> Int -> Int -> GenFun -> EvalPars -> [Point] -> ToMove -> (FPoint, Config)
+nextTurn bound dist dist1 gfun epar us toMove = getMaxs cf cfs
     where getMaxs !acc [] = acc
           getMaxs !acc@(!mx, cs) ((i, c) : cis)
               | i >  mx   = getMaxs (i, c) cis
               -- | i == mx   = getMaxs (i, c) cis
               | otherwise = getMaxs acc cis
-          (cf:cfs) = ourMoves near near1 gfun epar us toMove
+          (cf:cfs) = ourMoves bound dist dist1 gfun epar us toMove
 
 -- Evaluate every of our moves with the average of the possible answers
-ourMoves :: DstFun -> DstFun -> GenFun -> EvalPars -> [Point] -> ToMove -> [(Float, Config)]
-ourMoves near near1 gfun epar us toMove = do
-    myc <- nextAnt True near near1 gfun 0 us toMove ([], M.empty)
-    let ocfs = nextPlayer near near1 gfun toMove myc
-        avg  = average (pes epar) (opt epar) $ map (evalOutcome near epar . snd) ocfs
-    return (avg, myc)
+ourMoves :: Point -> Int -> Int -> GenFun -> EvalPars -> [Point] -> ToMove
+         -> [(FPoint, Config)]
+ourMoves bound dist dist1 gfun epar us toMove = do
+    myc <- nextAnt True near' near1 gfun 0 us toMove ([], M.empty)
+    let ocfs = nextPlayer near' near1 gfun toMove myc
+        avg  = average (pes epar) (opt epar) $ map (evalOutcome near' epar . snd) ocfs
+        sec  = if agr epar then inv else 0
+        ens  = enemiesOfPlayer 0 toMove
+        -- (gc, va) = gravVar ens
+        gcu = gravCenter us
+        gce = gravCenter ens
+        inv = if gce == gcu then 1 else 1 / fromIntegral (distance bound gce gcu)
+    return ((avg, sec), myc)
+    where near' = near dist  bound
+          near1 = near dist1 bound
 
 -- Choose next player to move
 nextPlayer :: DstFun -> DstFun -> GenFun -> ToMove -> Config -> [Config]
@@ -93,7 +96,8 @@ interMove near near1 gfun a pla toMove pm = go [] [] $ extend gfun a
              Nothing -> if any (near1 p) tml || any (near p) cfl
                            then go (m:dcc) acc ms
                            else go dcc (d:acc) ms
-          tml = concatMap snd $ filter ((/= pla) . fst) $ M.assocs toMove
+          -- tml = concatMap snd $ filter ((/= pla) . fst) $ M.assocs toMove
+          tml = enemiesOfPlayer pla toMove
           cfl = map fst $ filter ((/= pla) . snd) $ M.assocs pm
 
 -- Having a final configuration we want to evaluate the outcome
@@ -159,17 +163,18 @@ findRoot near (o:os) ens seen
 -- This function divides all ants in fight zones
 -- In a fight zone only ants are included, which have contact
 -- with enemy ants from that zone - recursively
-fightZones :: DstFun -> [Point] -> [PlPoint] -> [([Point], ToMove)] -> [([Point], ToMove)]
-fightZones near us them acc
-    | Just (root, (rest, seen)) <- findRoot near us them []
-        = goFightZones near root rest them acc
+fightZones :: Point -> Int -> [Point] -> [PlPoint] -> [([Point], ToMove)] -> [([Point], ToMove)]
+fightZones bound dist us them acc
+    | Just (root, (rest, seen)) <- findRoot (near dist bound) us them []
+        = goFightZones bound dist root rest them acc
     | otherwise = acc
 
-goFightZones :: DstFun -> Point -> [Point] -> [PlPoint] -> [([Point], ToMove)] -> [([Point], ToMove)]
-goFightZones near root rest them acc = fightZones near rus rthem (zon:acc)
+goFightZones :: Point -> Int -> Point -> [Point] -> [PlPoint] -> [([Point], ToMove)]
+             -> [([Point], ToMove)]
+goFightZones bound dist root rest them acc = fightZones bound dist rus rthem (zon:acc)
     where fzi = FZI { unk = S.fromList (zip (repeat 0) rest) `S.union` S.fromList them,
                   ope = S.singleton (0, root), clo = S.empty }
-          fzf = extendCol near fzi
+          fzf = extendCol (near dist bound) fzi
           zon = makeZone $ clo fzf
           (rus, rthem) = restOursAnts $ unk fzf
 
@@ -189,3 +194,7 @@ average pes opt xs = go (0, 0, 1000000, -1000000) xs
           go (!s, !c, !mi, !ma) (x:xs) = let y = fromIntegral x
                                          in  go (s+y, c+1, min mi y, max ma y) xs
           av = 100 - pes - opt
+
+near r u a b = euclidSquare u a b <= r
+
+enemiesOfPlayer pla toMove = concatMap snd $ filter ((/= pla) . fst) $ M.assocs toMove

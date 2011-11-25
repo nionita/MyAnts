@@ -16,6 +16,8 @@ module Ants
   , euclidSquare
   , sortByDist
   , inRadius2
+  , gravCenter
+  , gravVar
 
     -- main function
   , game
@@ -31,12 +33,13 @@ module Ants
   ) where
 
 import Control.Applicative
-import Control.Monad (forM_)
+import Control.Monad (forM_, when)
 import Data.Array.IO
 import qualified Data.ByteString.Char8 as B
 import Data.Char (digitToInt, toUpper)
-import Data.List (delete, sortBy, lookup)
+import Data.List (delete, sortBy, lookup, foldl')
 import Data.Maybe (fromMaybe)
+import qualified Data.Map as M
 import Data.Ord (comparing)
 import qualified Data.Set as S
 import Data.Time.Clock
@@ -152,12 +155,14 @@ issueOrder order = do
       sdir = show . direction $ order
   putStrLn $ "o " ++ srow ++ " " ++ scol ++ " " ++ sdir
 
-finishTurn :: [Order] -> IO ()
-finishTurn ords = do
+finishTurn :: GameParams -> [Order] -> IO ()
+finishTurn gp ords = do
   putStrLn "go"
   hFlush stdout
-  -- hPutStrLn stderr "Orders:"
-  -- mapM_ (hPutStrLn stderr . show) ords
+  let dubs = collisions gp ords
+  when (not $ null dubs) $ do
+      hPutStrLn stderr "Dubs:"
+      mapM_ (hPutStrLn stderr . show) dubs
   performGC
 
 tuplify2 :: [a] -> (a, a)
@@ -294,7 +299,7 @@ gameLoop gp gs doTurn = do
           gs1 <- updateGame gp gs
           (orders, gs2) <- doTurn gp gs1
           mapM_ issueOrder orders
-          finishTurn orders
+          finishTurn gp orders
           gameLoop gp gs2 doTurn
       | B.pack "end" `B.isPrefixOf` line = endGame
       | otherwise = do
@@ -307,7 +312,7 @@ game doTurn = do
   let gp = createParams $ map (tuplify2 . B.words) paramInput
   hPutStrLn stderr $ "Params:\n" ++ show gp
   gs <- initialGameState gp
-  finishTurn [] -- signal done with setup
+  finishTurn gp [] -- signal done with setup
   gameLoop gp gs doTurn
 
 getFoods :: Food -> [Point] -> [Point]
@@ -344,5 +349,27 @@ sortRevByDist f bound from as = sortBy (comparing (negate . snd))
 inRadius2 :: (a -> Point) -> Int -> Point -> Point -> [a] -> [a]
 -- inRadius2 f r bound from as = filter ((<=r) . distance bound from . f) as
 inRadius2 f r bound from as = filter ((<=r) . euclidSquare bound from . f) as
+
+-- Gravity center
+-- It must have at least one point!
+gravCenter :: [Point] -> Point
+gravCenter ps = (x `div` c, y `div` c)
+    where ((x, y), c) = foldl' f ((0, 0), 0) ps
+          f ((x, y), c) (xc, yc) = ((x + xc, y + yc), c + 1)
+
+-- Variance
+gravVar :: Point -> [Point] -> (Point, Point)
+gravVar u ps = (gc, (dx `div` l, dy `div` l))
+    where gc = gravCenter ps
+          l  = length ps
+          dx = sum $ map (modDistance (fst u) (fst gc) . fst) ps
+          dy = sum $ map (modDistance (snd u) (snd gc) . snd) ps
+
+collisions gp ords = filter fi $ M.assocs mp
+    where u = (rows gp, cols gp)
+          mp = foldr fo M.empty $ map (\ord -> (move u (source ord) (direction ord), [ord])) ords
+          fo = uncurry (M.insertWith (++))
+          fi (_, a:b:_) = True
+          fi _          = False
 
 -- vim: set expandtab:
