@@ -8,6 +8,7 @@ import Data.Array.Base (unsafeRead)
 import Data.Array.Unboxed
 import Data.Array.IO
 import Data.List
+import Data.Ord (comparing)
 import qualified Data.Map as M
 import Data.Maybe (fromJust, catMaybes)
 import Data.Ord (comparing)
@@ -62,8 +63,8 @@ type LibGrad  = M.Map Point [EDir]
 
 -- Some constants and constant-like definitions:
 msReserve = 250		-- reserve time for answer back (ms)
-msDecrAst = 400		-- under this time we decrese the AStar searches per turn
-msIncrAst = 480		-- over this time we increse the AStar searches per turn
+msDecrAst = 350		-- under this time we decrese the AStar searches per turn
+msIncrAst = 470		-- over this time we increse the AStar searches per turn
 maxMaxASt = 50		-- maximum AStar searches per turn
 attMajority = 2		-- used when attacking many to many
 maxPlanWait = 5		-- how long to wait in a plan when path is blocked
@@ -111,21 +112,24 @@ doTurn gp gs = do
       fzs = fightZones (snd b) zoneRadius2 (ours gs) (ants gs) []
   -- when (not $ null fzs) $ hPutStrLn stderr $ "Fight zones:\n" ++ show fzs
   st1 <- execState (fightAnts fzs) st0	-- first the fighting ants
-  stf <- execState (freeAnts 1 (ours gs)) st1	-- then the free ants
+  let fas = sortFreeAnts st1	-- the ones near important points first
+  stf <- execState (freeAnts 1 fas) st1	-- then the free ants
   restTime <- timeRemaining gp gs
   let plans = M.fromList $ stPlans stf
-      astpt = aStarNextTurn (peMaxPASt npers) restTime
+      astpt = aStarNextTurn (peMaxPASt npers) (stCrtASt stf) restTime
       fpers = (stPersist stf) { pePlMemo = plans, peMaxPASt = astpt }
       orders = stOrders stf
-  hPutStrLn stderr $ "Time remaining (ms): " ++ show restTime
-  -- hPutStrLn stderr $ "Next aStar per turn: " ++ show astpt
+  -- hPutStrLn stderr $ "Time remaining (ms): " ++ show restTime
+  --                       ++ ", ants: " ++ show (stOurCnt stf)
+  --                       ++ ", A*: rest: " ++ show (stCrtASt stf) ++ ", next: " ++ show astpt
   let gsf = gs { ants = [], ours = [], foodP = [], userState = Just fpers }
   return (orders, gsf)
 
-aStarNextTurn :: Int -> Int -> Int
-aStarNextTurn prv tm
+aStarNextTurn :: Int -> Int -> Int -> Int
+aStarNextTurn prv use tm
     | tm <= msDecrAst = max 1 (prv `div` 2)	-- minimum 1
-    | tm >= msIncrAst = min maxMaxASt (prv + 1)	-- maximum as per parameter
+    | tm >= msIncrAst && use < 0
+                      = min maxMaxASt (prv + 1)	-- maximum as per parameter
     | otherwise       = prv
 
 -- Attacs and defences of enemy hills: how many ants of us and of them are there?
@@ -310,6 +314,7 @@ easyFood pt maxl = do
              gp = stPars st
              mx = stCrtASt st	-- we are limited by aStar searches
              foods = map fst $ takeWhile ((<= viewRadius gp) . snd) $ sortByDist id u pt fo
+         modify $ \s -> s { stCrtASt = mx - 1 }
          if mx <= 0 || null foods
             then return Nothing
             else toNearest pt foods maxl
@@ -321,7 +326,6 @@ toNearest pt pts maxl = do
         w = water . stState $ st
         ptsset = S.fromList pts
     mpath <- liftIO $ aStar (validDirs w u allDirs) (listDistance u pts) pt (`S.member` ptsset) (Just maxl)
-    modify $ \s -> s { stCrtASt = stCrtASt s - 1 }
     case mpath of
         Nothing    -> return Nothing
         Just path' -> if null path'
@@ -390,6 +394,7 @@ smellBlood pt = do
   st <- get
   let mx   = stCrtASt st	-- we are limited by aStar searches
       hots = stHotSpots st
+  modify $ \s -> s { stCrtASt = mx - 1 }
   if mx <= 0 || null hots
      then return False
      else do
@@ -431,8 +436,6 @@ rest pt = do
     -- act <- choose [(1, maiRar pt), (3, explore pt), (7, moveRandom pt)]
     act <- choose [(3, explore pt), (7, moveRandom pt)]
     act
-
--- Fight section
 
 moveToList :: Point -> [Point] -> MyGame Bool
 moveToList pt as = do
@@ -559,11 +562,11 @@ gotoPoint isFood pt to = do
   let w = water . stState $ st
       u = stUpper st
       mx = stCrtASt st
+  modify $ \s -> s { stCrtASt = mx - 1 }
   if mx <= 0
      then return False
      else do
        mpath <- liftIO $ aStar (validDirs w u allDirs) (distance u to) pt (== to) Nothing
-       modify $ \s -> s { stCrtASt = mx - 1 }
        case mpath of
          Nothing    -> return False
          Just path' -> do
@@ -646,6 +649,15 @@ explore pt = do
                 else do
                   se <- seenPoint n
                   if se then go u (i-1) else gotoPoint False pt n
+
+sortFreeAnts :: MyState -> [Point]
+sortFreeAnts st
+    | null ips  = oa
+    | otherwise = map fst $ sortBy (comparing snd) $ map (\p -> (p, lisd p)) oa
+    where ips    = map fst (stWeakEH st) ++ stHotSpots st
+          oa = ours $ stState st
+          lisd p = minimum $ map (distance u p) ips
+          u      = stUpper st
 
 -- The list cannot be null!
 choose :: [(Int, a)] -> MyGame a

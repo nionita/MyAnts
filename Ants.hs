@@ -107,13 +107,6 @@ data GameParams = GameParams
 modDistance :: Int -> Int -> Int -> Int
 modDistance n x y = min ((x - y) `mod` n) ((y - x) `mod` n)
 
-manhattan :: Point -- bound
-          -> Point -> Point -> Int
-manhattan (br, bc) (p1r, p1c) (p2r, p2c) = 
-  let rowd = modDistance (br + 1) p1r p2r
-      cold = modDistance (bc + 1) p1c p2c
-  in rowd + cold
-
 euclidSquare :: Point  -- bound
              -> Point -> Point -> Int
 euclidSquare (br, bc) (p1r, p1c) (p2r, p2c) =
