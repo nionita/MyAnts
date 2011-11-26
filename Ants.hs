@@ -50,27 +50,19 @@ import System.IO
 import System.Mem (performGC)
 
 -- type synonyms
-type Row = Int
-type Col = Int
-type Point = (Row, Col)
+type Point = (Int, Int)         -- (row, col)
 type Hill  = (Point, Int)
 type BitMap = IOUArray Point Bool
 type Food  = S.Set Point
 
 -- Wrap the coordinates
 (%!%) :: Point -> Point -> Point
-(%!%) p u = 
-  let !modCol = 1 + col u
-      !modRow = 1 + row u
-      !ixCol  = col p `mod` modCol
-      !ixRow  = row p `mod` modRow
+(%!%) (pr, pc) (ur, uc) = 
+  let !modCol = 1 + uc
+      !modRow = 1 + ur
+      !ixCol  = pc `mod` modCol
+      !ixRow  = pr `mod` modRow
   in (ixRow, ixCol)
-
-row :: Point -> Row
-row = fst
-
-col :: Point -> Col
-col = snd
 
 data Dir = North | East | South | West deriving (Bounded, Eq, Enum)
 
@@ -117,47 +109,39 @@ modDistance n x y = min ((x - y) `mod` n) ((y - x) `mod` n)
 
 manhattan :: Point -- bound
           -> Point -> Point -> Int
-manhattan bound p1 p2 = 
-  let rowd = modDistance (row bound + 1) (row p1) (row p2)
-      cold = modDistance (col bound + 1) (col p1) (col p2)
+manhattan (br, bc) (p1r, p1c) (p2r, p2c) = 
+  let rowd = modDistance (br + 1) p1r p2r
+      cold = modDistance (bc + 1) p1c p2c
   in rowd + cold
-
-oneNorm :: Point -> Int
-oneNorm p = row p + col p
-
-twoNormSquared :: Point -> Int
-twoNormSquared p = row p ^ 2 + col p ^ 2
 
 euclidSquare :: Point  -- bound
              -> Point -> Point -> Int
-euclidSquare bound p1 p2 = 
-  let rowd = modDistance (row bound + 1) (row p1) (row p2)
-      cold = modDistance (col bound + 1) (col p1) (col p2)
-  in (rowd ^ 2) + (cold ^ 2)
+euclidSquare (br, bc) (p1r, p1c) (p2r, p2c) =
+  let rowd = modDistance (br + 1) p1r p2r
+      cold = modDistance (bc + 1) p1c p2c
+  in (rowd * rowd) + (cold * cold)
 
 distance :: Point -> Point -> Point -> Int
-distance bound l1 l2 =
-  let maxRow = row bound
-      maxCol = col bound
-      rowDist = modDistance maxRow (row l1) (row l2)
-      colDist = modDistance maxCol (col l1) (col l2)
+distance (br, bc) (p1r, p1c) (p2r, p2c) =
+  let rowDist = modDistance (br + 1) p1r p2r
+      colDist = modDistance (bc + 1) p1c p2c
   in rowDist + colDist
 
 move :: Point -> Point -> Dir -> Point
-move u p dir
-  | dir == North = (row p - 1, col p) %!% u
-  | dir == South = (row p + 1, col p) %!% u
-  | dir == West  = (row p, col p - 1) %!% u
-  | otherwise    = (row p, col p + 1) %!% u
+move u (rp, cp) dir
+  | dir == North = let !rp1 = rp - 1 in (rp1, cp) %!% u
+  | dir == South = let !rp1 = rp + 1 in (rp1, cp) %!% u
+  | dir == West  = let !cp1 = cp - 1 in (rp, cp1) %!% u
+  | otherwise    = let !cp1 = cp + 1 in (rp, cp1) %!% u
 
 sumPoint :: Point -> Point -> Point -> Point
-sumPoint bound p1 p2 = (row p1 + row p2, col p1 + col p2) %!% bound
+sumPoint bound (p1r, p1c) (p2r, p2c) = (p1r + p2r, p1c + p2c) %!% bound
 
 issueOrder :: Order -> IO ()
 issueOrder order = do
-  let p = source order
-      srow = show . row $ p
-      scol = show . col $ p
+  let (pr, pc) = source order
+      srow = show pr
+      scol = show pc
       sdir = show . direction $ order
   putStrLn $ "o " ++ srow ++ " " ++ scol ++ " " ++ sdir
 
@@ -372,7 +356,7 @@ gravVar u ps = (gc, (dx `div` l, dy `div` l))
           dy = sum $ map (modDistance (snd u) (snd gc) . snd) ps
 
 collisions gp ords = filter fi $ M.assocs mp
-    where u = (rows gp, cols gp)
+    where u = (rows gp - 1, cols gp - 1)
           mp = foldr fo M.empty $ map (\ord -> (move u (source ord) (direction ord), [ord])) ords
           fo = uncurry (M.insertWith (++))
           fi (_, a:b:_) = True
