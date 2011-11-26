@@ -59,10 +59,10 @@ type PlanMemo = M.Map Point Plan
 type LibGrad  = M.Map Point [EDir]
 
 -- Some constants and constant-like definitions:
-msReserve = 150		-- reserve time for answer back (ms)
-msDecrAst = 300		-- under this time we decrese the AStar searches per turn
-msIncrAst = 650		-- over this time we increse the AStar seraches per turn
-maxMaxASt = 70		-- maximum AStar searches per turn
+msReserve = 200		-- reserve time for answer back (ms)
+msDecrAst = 350		-- under this time we decrese the AStar searches per turn
+msIncrAst = 450		-- over this time we increse the AStar searches per turn
+maxMaxASt = 50		-- maximum AStar searches per turn
 attMajority = 2		-- used when attacking many to many
 maxPlanWait = 3		-- how long to wait in a plan when path is blocked
 checkEasyFood = 10	-- how often to check for easy food?
@@ -426,7 +426,8 @@ gotoFood pt = do
 
 -- When boring:
 rest pt = do
-    act <- choose [(1, maiRar pt), (3, explore pt), (7, moveRandom pt)]
+    -- act <- choose [(1, maiRar pt), (3, explore pt), (7, moveRandom pt)]
+    act <- choose [(3, explore pt), (7, moveRandom pt)]
     act
 
 -- Fight section
@@ -628,14 +629,21 @@ maiRar pt = do
 explore :: Point -> MyGame Bool
 explore pt = do
   vs <- gets stValDirs
+  bound  <- gets stUpper
   case vs of
     []       -> return False		-- should not come here
     [(d, _)] -> orderMove pt d "explore"
-    _        -> go vs
-    where go [] = return False
-          go ((d, n) : ds) = do
-             se <- seenPoint n
-             if se then go ds else orderMove pt d "explore"
+    _        -> go bound 3	-- try 3 times
+    where go u 0 = return False
+          go u i = do
+             rx <- liftIO $ randomRIO (-15, 15)
+             ry <- liftIO $ randomRIO (-15, 15)
+             let n = sumPoint u pt (rx, ry)
+             if distance u pt n <= 5	-- not too near
+                then go u i
+                else do
+                  se <- seenPoint n
+                  if se then go u (i-1) else gotoPoint False pt n
 
 -- The list cannot be null!
 choose :: [(Int, a)] -> MyGame a

@@ -1,3 +1,5 @@
+{-# LANGUAGE BangPatterns #-}
+
 module Ants
   (
     -- Data structures
@@ -12,6 +14,7 @@ module Ants
     -- Utility functions
   , timeRemaining
   , move
+  , sumPoint
   , distance
   , euclidSquare
   , sortByDist
@@ -56,11 +59,11 @@ type Food  = S.Set Point
 
 -- Wrap the coordinates
 (%!%) :: Point -> Point -> Point
-(%!%) u p = 
-  let modCol = 1 + col u
-      modRow = 1 + row u
-      ixCol  = col p `mod` modCol
-      ixRow  = row p `mod` modRow
+(%!%) p u = 
+  let !modCol = 1 + col u
+      !modRow = 1 + row u
+      !ixCol  = col p `mod` modCol
+      !ixRow  = row p `mod` modRow
   in (ixRow, ixCol)
 
 row :: Point -> Row
@@ -142,10 +145,13 @@ distance bound l1 l2 =
 
 move :: Point -> Point -> Dir -> Point
 move u p dir
-  | dir == North = u %!% (row p - 1, col p)
-  | dir == South = u %!% (row p + 1, col p)
-  | dir == West  = u %!% (row p, col p - 1)
-  | otherwise    = u %!% (row p, col p + 1)
+  | dir == North = (row p - 1, col p) %!% u
+  | dir == South = (row p + 1, col p) %!% u
+  | dir == West  = (row p, col p - 1) %!% u
+  | otherwise    = (row p, col p + 1) %!% u
+
+sumPoint :: Point -> Point -> Point -> Point
+sumPoint bound p1 p2 = (row p1 + row p2, col p1 + col p2) %!% bound
 
 issueOrder :: Order -> IO ()
 issueOrder order = do
@@ -159,10 +165,10 @@ finishTurn :: GameParams -> [Order] -> IO ()
 finishTurn gp ords = do
   putStrLn "go"
   hFlush stdout
-  let dubs = collisions gp ords
-  when (not $ null dubs) $ do
-      hPutStrLn stderr "Dubs:"
-      mapM_ (hPutStrLn stderr . show) dubs
+  -- let dubs = collisions gp ords
+  -- when (not $ null dubs) $ do
+  --     hPutStrLn stderr "Dubs:"
+  --     mapM_ (hPutStrLn stderr . show) dubs
   performGC
 
 tuplify2 :: [a] -> (a, a)
