@@ -64,12 +64,12 @@ msDecrAst = 350		-- under this time we decrese the AStar searches per turn
 msIncrAst = 450		-- over this time we increse the AStar searches per turn
 maxMaxASt = 50		-- maximum AStar searches per turn
 attMajority = 2		-- used when attacking many to many
-maxPlanWait = 3		-- how long to wait in a plan when path is blocked
+maxPlanWait = 5		-- how long to wait in a plan when path is blocked
 checkEasyFood = 10	-- how often to check for easy food?
 zoneMax      = 9	-- max ants in a zone fight
-maxSmellPath = 60	-- max steps for smell blood paths
+maxSmellPath = 50	-- max steps for smell blood paths
 cntLastAttack = 200	-- when we are so many, go to last attack
-stepsToBlood = 10	-- afterwhich we reconsider
+stepsToBlood = 15	-- afterwhich we reconsider
 viewRadius   = (1*) . viewradius2	-- visibility radius
 foodRadius   = (1*) . const 100	-- in which we go to food
 homeRadius   = (1*) . const 100	-- in which we consider to be at home
@@ -633,11 +633,11 @@ explore pt = do
   case vs of
     []       -> return False		-- should not come here
     [(d, _)] -> orderMove pt d "explore"
-    _        -> go bound 3	-- try 3 times
+    _        -> go bound 2	-- try 3 times
     where go u 0 = return False
           go u i = do
-             rx <- liftIO $ randomRIO (-15, 15)
-             ry <- liftIO $ randomRIO (-15, 15)
+             rx <- liftIO $ randomRIO (-20, 20)
+             ry <- liftIO $ randomRIO (-20, 20)
              let n = sumPoint u pt (rx, ry)
              if distance u pt n <= 5	-- not too near
                 then go u i
