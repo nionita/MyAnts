@@ -3,6 +3,8 @@
 module Brain (doTurn) where
 
 import Control.Monad (filterM, when, forM_, liftM, liftM2, foldM)
+import Data.Ix (index)
+import Data.Array.Base (unsafeRead)
 import Data.Array.Unboxed
 import Data.Array.IO
 import Data.List
@@ -59,9 +61,9 @@ type PlanMemo = M.Map Point Plan
 type LibGrad  = M.Map Point [EDir]
 
 -- Some constants and constant-like definitions:
-msReserve = 200		-- reserve time for answer back (ms)
-msDecrAst = 350		-- under this time we decrese the AStar searches per turn
-msIncrAst = 450		-- over this time we increse the AStar searches per turn
+msReserve = 250		-- reserve time for answer back (ms)
+msDecrAst = 400		-- under this time we decrese the AStar searches per turn
+msIncrAst = 480		-- over this time we increse the AStar searches per turn
 maxMaxASt = 50		-- maximum AStar searches per turn
 attMajority = 2		-- used when attacking many to many
 maxPlanWait = 5		-- how long to wait in a plan when path is blocked
@@ -574,7 +576,7 @@ gotoPoint isFood pt to = do
 -- Given a bitmap of "busy" points, and a source point, find
 -- the valid directions to move
 validDirs :: BitMap -> Point -> [Dir] -> Point -> IO [PathInfo]
-validDirs w u ds pt = notBitMap w $ map (\d -> (d, move u pt d)) ds
+validDirs w u ds pt = notBitMap w u $ map (\d -> (d, move u pt d)) ds
 
 -- Given a point, give the neighbour points, where we could find food
 -- We don't even check for water, as food will for sure not be there
@@ -740,8 +742,8 @@ filterBusy f as = do
     let busy = stBusy st
     lift $ filterM (\a -> liftM not $ readArray busy (f a)) as
 
-notBitMap :: BitMap -> [(a, Point)] -> IO [(a, Point)]
-notBitMap w = filterM (liftM not . readArray w . snd)
+notBitMap :: BitMap -> Point -> [(a, Point)] -> IO [(a, Point)]
+notBitMap w u = filterM (liftM not . unsafeRead w . index ((0, 0), u) . snd)
 
 debug :: String -> MyGame ()
 -- debug s = liftIO $ hPutStrLn stderr s

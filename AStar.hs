@@ -1,4 +1,6 @@
 {-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE BangPatterns #-}
+
 module AStar (
     PathInfo,
     aStar
@@ -44,8 +46,8 @@ aStar fions heur from fulfilled mmax = go iopen S.empty
              | Just mx <- mmax, g oi + heur op >= mx	-- we reached maximum length
                               = return Nothing
              | otherwise = do
-                 let closed' = S.insert op closed
-                 open' <- expandNode fions heur o os closed'
+                 let !closed' = S.insert op closed
+                 !open' <- expandNode fions heur o os closed'
                  go open' closed'
              where (o@(op, oi), os) = opRemoveMin open
                    rez = Just . snd $ oi
@@ -57,14 +59,14 @@ expandNode :: (OpenClass op, Monad m, Functor m)
            -> op			-- the open "list"
            -> Closed			-- the closed "list"
            -> m op			-- returns the new open list
-expandNode fions heur (ex, oi) open closed = foldl' go open <$> fions ex
+expandNode fions heur (!ex, oi) open closed = foldl' go open <$> fions ex
     where go op (_, p) | p `S.member` closed = op
           go op dp@(_, p)
               = case opRetrieve p op of
                     Just oi -> if tent_g >= g oi then op else newsucc op dp
                     Nothing -> newsucc op dp
           newsucc op dp@(_, p) = opInsert p ((tent_g, tent_g + heur p), dp : sson) op
-          tent_g = g oi + 1	-- in our case the edge cost is always 1
+          !tent_g = g oi + 1	-- in our case the edge cost is always 1
           sson = snd oi
 
 -- Implement the open collection through 2 maps
@@ -94,11 +96,11 @@ biMapRemoveMin bi = ((p, oi), bi')
     where pv = perValue bi
           v  = head $ M.keys pv			-- take smallest value
           ps = fromJust $ M.lookup v pv		-- and the corresponding list
-          p  = head ps				-- one of the points
+          !p  = head ps				-- one of the points
           pp = perPoint bi
-          oi = fromJust $ M.lookup p pp		-- now we have the info
-          pp' = M.delete p pp			-- remove from per point map
-          pv' = if null (tail ps) then M.delete v pv else M.insert v (tail ps) pv
+          !oi = fromJust $ M.lookup p pp	-- now we have the info
+          !pp' = M.delete p pp			-- remove from per point map
+          !pv' = if null (tail ps) then M.delete v pv else M.insert v (tail ps) pv
           bi' = BiMap { perPoint = pp', perValue = pv' }
 
 biMapRetrieve :: Point -> BiMap -> Maybe OpenInfo
@@ -109,12 +111,12 @@ biMapInsert p oi bi = BiMap { perPoint = pp', perValue = pv'' }
     where pp = perPoint bi
           pv = perValue bi
           v  = f oi
-          pp' = M.insert p oi pp
+          !pp' = M.insert p oi pp
           -- now insert into value map, but remove a possibly existing old entry (from old value list)
-          pv' = case M.lookup p pp of
+          !pv' = case M.lookup p pp of
                     Nothing  -> pv
                     Just oi' -> let v' = f oi'
                                     ps = fromJust $ M.lookup v' pv
                                     ps' = delete p ps
                                 in if null ps' then M.delete v' pv else M.insert v' ps' pv
-          pv'' = M.insertWith (++) v [p] pv'
+          !pv'' = M.insertWith (++) v [p] pv'
