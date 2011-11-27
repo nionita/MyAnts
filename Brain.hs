@@ -4,6 +4,7 @@ module Brain (doTurn) where
 
 import Control.Monad (filterM, when, forM_, liftM, liftM2, foldM)
 import Data.Ix (index)
+import Data.Functor ((<$>))
 import Data.Array.Base (unsafeRead)
 import Data.Array.Unboxed
 import Data.Array.IO
@@ -37,7 +38,7 @@ data MyState = MyState {
          stOurCnt  :: Int,			-- total count of our ants
          stCrtASt  :: Int,			-- current astar searches
          stCanStay :: Bool,			-- current ant can wait?
-         stValDirs :: [PathInfo]		-- valid directions for current ant
+         stValDirs :: [(Dir, Point)]		-- valid directions for current ant
      }
 
 data Persist = Persist {
@@ -325,13 +326,14 @@ toNearest pt pts maxl = do
     let u = stUpper st
         w = water . stState $ st
         ptsset = S.fromList pts
-    mpath <- liftIO $ aStar (validDirs w u allDirs) (listDistance u pts) pt (`S.member` ptsset) (Just maxl)
+    mpath <- liftIO $ aStar (natfoDirs w u) (listDistance u pts) pt (`S.member` ptsset) (Just maxl)
+    modify $ \s -> s { stCrtASt = stCrtASt s - 1 }
     case mpath of
         Nothing    -> return Nothing
         Just path' -> if null path'
             then return Nothing
             else do
-              let np = snd $ head path'
+              let np = piPoint $ head path'
                   path = reverse path'
               return $ Just (np, path)
     where listDistance u list p = minimum $ map (distance u p) list
@@ -345,27 +347,20 @@ followPlan pt = do
     case mplan of
         Nothing   -> return False	-- no plan
         Just plan -> do
-            vs <- gets stValDirs
-            let pp = plPath plan
-            if null pp || not (head pp `elem` vs)
-               then return False	-- path is empty or first step not allowed
-               else do
-                 measy <- if (plPLen plan) `mod` checkEasyFood == 0	-- do we have an easy food?
-                             then easyFood pt (plPLen plan)		-- check only now and then
-                             else return Nothing
-                 case measy of
-                     Nothing          -> executePlan pt plan
-                     Just (fo, fpath) -> if (head fpath `elem` vs)
-                         then do
-                             let lfo = length fpath
-                                 fplan = Plan { plPrio = Green, plTarget = fo, plPath = fpath,
-                                                plPLen = lfo, plWait = 0 }
-                             act <- choose [
-                                        (lfo, executePlan pt plan),
-                                        (plPLen plan, executePlan pt fplan)
-                                    ]
-                             act
-                         else executePlan pt plan
+            measy <- if (plPLen plan) `mod` checkEasyFood == 0	-- do we have an easy food?
+                        then easyFood pt (plPLen plan)		-- check only now and then
+                        else return Nothing
+            case measy of
+                Nothing          -> executePlan pt plan
+                Just (fo, fpath) -> do
+                    let lfo = sum (map piTimes fpath)
+                        fplan = Plan { plPrio = Green, plTarget = fo, plPath = fpath,
+                                       plPLen = lfo, plWait = 0 }
+                    act <- choose [
+                               (lfo, executePlan pt plan),
+                               (plPLen plan, executePlan pt fplan)
+                           ]
+                    act
 
 -- How to attack and raze an enemy hill
 razeAttac :: Point -> MyGame Bool
@@ -403,7 +398,7 @@ smellBlood pt = do
             Nothing          -> return False
             Just (ho, hpath) -> do
                 let hplan = Plan { plPrio = Green, plTarget = ho,
-                                   plPath = plp, plPLen = length plp,
+                                   plPath = plp, plPLen = sum (map piTimes plp),
                                    plWait = maxPlanWait }
                     plp = take stepsToBlood hpath
                     gp  = stPars st
@@ -566,20 +561,41 @@ gotoPoint isFood pt to = do
   if mx <= 0
      then return False
      else do
-       mpath <- liftIO $ aStar (validDirs w u allDirs) (distance u to) pt (== to) Nothing
+       mpath <- liftIO $ aStar (natfoDirs w u) (distance u to) pt (== to) Nothing
+       modify $ \s -> s { stCrtASt = mx - 1 }
        case mpath of
          Nothing    -> return False
          Just path' -> do
            let path = reverse path'
                plan = Plan { plPrio = Green, plTarget = to, plPath = path,
-                             plPLen = length path, plWait = maxPlanWait }
+                             plPLen = sum (map piTimes path), plWait = maxPlanWait }
            -- when isFood $ modify $ \s -> s { stFrFood = S.delete to (stFrFood s) }
            executePlan pt plan
 
 -- Given a bitmap of "busy" points, and a source point, find
 -- the valid directions to move
-validDirs :: BitMap -> Point -> [Dir] -> Point -> IO [PathInfo]
+validDirs :: BitMap -> Point -> [Dir] -> Point -> IO [(Dir, Point)]
 validDirs w u ds pt = notBitMap w u $ map (\d -> (d, move u pt d)) ds
+
+-- For jump point search: only natural & forced neighbours are generated
+natfoDirs :: BitMap -> Point -> (Point, Maybe JPInfo) -> IO [(Point, JPInfo)]
+natfoDirs w u (pt, Nothing) = map pathInfoToPJPInfo <$> validDirs w u allDirs pt
+natfoDirs w u (pt, Just jpi) = do
+    mjp <- findJumpPoint w u pt (jpDir jpi)
+    ts  <- map pathInfoToPJPInfo <$> validDirs w u (jpDirs jpi) pt
+    return $ case mjp of
+        Just jp -> jp : ts
+        _       -> ts
+
+pathInfoToPJPInfo :: (Dir, Point) -> (Point, JPInfo)
+pathInfoToPJPInfo (d, p) = (p, JPInfo { jpDir = d, jpCost = 1, jpDirs = [] })
+
+findJumpPoint :: BitMap -> Point -> Point -> Dir -> IO (Maybe (Point, JPInfo))
+findJumpPoint w u pt d = do
+    let p = move u pt d
+    b <- readArray w p
+    if b then return Nothing
+         else return (Just (p, JPInfo { jpDir = d, jpCost = 1, jpDirs = [] }))
 
 -- Given a point, give the neighbour points, where we could find food
 -- We don't even check for water, as food will for sure not be there
@@ -592,7 +608,7 @@ foodPoints pt = do
 -- Gets the valid dirs to move (or stay), considering busy cells
 -- and ants with less liberty grades (because they are
 -- part of a fight zone)
-getValidDirs :: Point -> MyGame (Bool, [PathInfo])
+getValidDirs :: Point -> MyGame (Bool, [(Dir, Point)])
 getValidDirs pt = do
   st <- get
   let busy = stBusy st
@@ -687,13 +703,16 @@ orderMove p d lo = do
 executePlan :: Point -> Plan -> MyGame Bool
 executePlan pt plan | null (plPath plan) = return False
 executePlan pt plan = do
-    let (dp@(d, p) : path) = plPath plan
+    let (pi : path) = plPath plan
+        p = piPoint pi
     w <- isWater p
     if w
        then return False
        else do
            b  <- isBusy p
            vs <- gets stValDirs
+           let d = piDir pi
+               dp = (d, p)
            if b || not (dp `elem` vs)
               then do	-- we cannot (yet) move to follow the plan
                   cst <- gets stCanStay
@@ -707,8 +726,17 @@ executePlan pt plan = do
                              ]
                          act
               else do
-                  newPlan p plan { plPath = path, plPLen = plPLen plan - 1, plWait = maxPlanWait }
+                  npath <- stepMultPath pi path
+                  newPlan p plan { plPath = npath, plPLen = plPLen plan - 1, plWait = maxPlanWait }
                   orderMove pt d "execPlan"
+
+stepMultPath :: PathInfo -> [PathInfo] -> MyGame [PathInfo]
+stepMultPath pi pis
+    | piTimes pi == 1 = return pis
+    | otherwise = do
+        u <- gets stUpper
+        let p = move u (piPoint pi) (piDir pi)
+        return $ pi { piPoint = p, piTimes = piTimes pi - 1 } : pis
 
 deleteTargets :: [Point] -> MyGame ()
 deleteTargets foods = do
@@ -754,7 +782,8 @@ filterBusy f as = do
     let busy = stBusy st
     lift $ filterM (\a -> liftM not $ readArray busy (f a)) as
 
-notBitMap :: BitMap -> Point -> [(a, Point)] -> IO [(a, Point)]
+bitMap, notBitMap :: BitMap -> Point -> [(a, Point)] -> IO [(a, Point)]
+bitMap    w u = filterM (            unsafeRead w . index ((0, 0), u) . snd)
 notBitMap w u = filterM (liftM not . unsafeRead w . index ((0, 0), u) . snd)
 
 debug :: String -> MyGame ()
