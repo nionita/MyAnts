@@ -146,7 +146,7 @@ finishTurn gp ords = do
   -- when (not $ null dubs) $ do
   --     hPutStrLn stderr "Dubs:"
   --     mapM_ (hPutStrLn stderr . show) dubs
-  performGC
+  -- performGC
 
 tuplify2 :: [a] -> (a, a)
 tuplify2 (x:y:_) = (x, y)

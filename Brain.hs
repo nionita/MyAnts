@@ -63,9 +63,9 @@ type PlanMemo = M.Map Point Plan
 type LibGrad  = M.Map Point [EDir]
 
 -- Some constants and constant-like definitions:
-msReserve = 250		-- reserve time for answer back (ms)
-msDecrAst = 350		-- under this time we decrese the AStar searches per turn
-msIncrAst = 470		-- over this time we increse the AStar searches per turn
+msReserve = 150		-- reserve time for answer back (ms)
+msDecrAst = 320		-- under this time we decrese the AStar searches per turn
+msIncrAst = 460		-- over this time we increse the AStar searches per turn
 maxMaxASt = 50		-- maximum AStar searches per turn
 attMajority = 2		-- used when attacking many to many
 maxPlanWait = 5		-- how long to wait in a plan when path is blocked
@@ -92,7 +92,7 @@ doTurn gp gs = do
                Nothing   -> do
                    nseen <- newArray b False
                    return $ Persist { peSeen = nseen, pePlMemo = M.empty,
-                                      peEnHills = [], peMaxPASt = maxMaxASt }
+                                      peEnHills = [], peMaxPASt = maxMaxASt `div` 2 }
   updateSeen gs (peSeen npers)
   -- these are enemy hills we see this turn
   let hinow = map fst $ filter ((/= 0) . snd) $ hills gs
@@ -113,6 +113,8 @@ doTurn gp gs = do
       fzs = fightZones (snd b) zoneRadius2 (ours gs) (ants gs) []
   -- when (not $ null fzs) $ hPutStrLn stderr $ "Fight zones:\n" ++ show fzs
   st1 <- execState (fightAnts fzs) st0	-- first the fighting ants
+  restTime <- timeRemaining gp gs
+  hPutStrLn stderr $ "Time remaining (ms) after fight: " ++ show restTime
   let fas = sortFreeAnts st1	-- the ones near important points first
   stf <- execState (freeAnts 1 fas) st1	-- then the free ants
   restTime <- timeRemaining gp gs
@@ -120,9 +122,9 @@ doTurn gp gs = do
       astpt = aStarNextTurn (peMaxPASt npers) (stCrtASt stf) restTime
       fpers = (stPersist stf) { pePlMemo = plans, peMaxPASt = astpt }
       orders = stOrders stf
-  -- hPutStrLn stderr $ "Time remaining (ms): " ++ show restTime
-  --                       ++ ", ants: " ++ show (stOurCnt stf)
-  --                       ++ ", A*: rest: " ++ show (stCrtASt stf) ++ ", next: " ++ show astpt
+  hPutStrLn stderr $ "Time remaining (ms): " ++ show restTime
+                        ++ ", ants: " ++ show (stOurCnt stf)
+                        ++ ", A*: rest: " ++ show (stCrtASt stf) ++ ", next: " ++ show astpt
   let gsf = gs { ants = [], ours = [], foodP = [], userState = Just fpers }
   return (orders, gsf)
 
@@ -154,9 +156,10 @@ freeAnts i points = do
   st <- get
   let gp = stPars  st
       gs = stState st
-  tr <- if i `mod` 10 == 0	-- to avoid to take the time so often
-           then return msReserve
-           else lift $ timeRemaining gp gs
+  -- tr <- if i `mod` 10 == 0	-- to avoid to take the time so often
+  --          then return msReserve
+  --          else lift $ timeRemaining gp gs
+  tr <- lift $ timeRemaining gp gs
   when (tr >= msReserve) $ do
       perAnt $ head points
       freeAnts (i+1) $ tail points
@@ -193,8 +196,8 @@ perFightZone r0 r1 fz@(us, themm) = do
         epar = fightParams st fz
         (sco, cfs) = nextTurn u r0 r1 (valDirs ibusy u) epar us themm
         oac = fst cfs
-    debug $ "Fight zone: us = " ++ show us ++ ", them = " ++ show themm
-    debug $ "Params: " ++ show epar ++ " score = " ++ show sco ++ "\nOur moves: " ++ show oac
+    -- debug $ "Fight zone: us = " ++ show us ++ ", them = " ++ show themm
+    -- debug $ "Params: " ++ show epar ++ " score = " ++ show sco ++ "\nOur moves: " ++ show oac
     mapM_ extOrderMove oac
     where valDirs :: UArray Point Bool -> Point -> Point -> [(Dir, Point)]
           valDirs w u pt = filter (not . (w!) . snd) $ map (\d -> (d, move u pt d)) allDirs
@@ -254,15 +257,27 @@ perAnt pt = do
            modify $ \s -> s { stCanStay = fst svs, stValDirs = snd svs }
            getGoal pt
 
+-- For actions which require A* search check if we have searches
+-- If not, return False (to try next action)
+-- This should be cheaper than checking other conditions first
+ifAStar :: MyGame Bool -> MyGame Bool
+ifAStar act = do
+    ast <- gets stCrtASt
+    if ast > 0
+       then act
+       else do
+           when (ast == 0) $ modify $ \s -> s { stCrtASt = -1 }
+           return False
+
 getGoal :: Point -> MyGame Bool
 getGoal pt =
     oneChoice pt <|>	-- if we have only one choice, take it
-    immRaze pt <|>	-- if we can immediately raze a hill, do it
+    ifAStar (immRaze pt) <|>	-- if we can immediately raze a hill, do it
     pickFood pt <|>	-- immediate food pick
     followPlan pt <|>	-- follow a plan
-    razeAttac pt <|>	-- raze attack
-    smellBlood pt <|>	-- if there is some battle, go there
-    gotoFood pt <|>	-- find some food
+    ifAStar (razeAttac pt) <|>	-- raze attack
+    ifAStar (smellBlood pt) <|>	-- if there is some battle, go there
+    ifAStar (gotoFood pt) <|>	-- find some food
     rest pt		-- whatever...
 
 -- When we have only one choice, take it
@@ -316,6 +331,7 @@ easyFood pt maxl = do
              mx = stCrtASt st	-- we are limited by aStar searches
              foods = map fst $ takeWhile ((<= viewRadius gp) . snd) $ sortByDist id u pt fo
          modify $ \s -> s { stCrtASt = mx - 1 }
+         -- debug $ "easyFood: " ++ show pt ++ ", stCrtASt = " ++ show (mx-1)
          if mx <= 0 || null foods
             then return Nothing
             else toNearest pt foods maxl
@@ -326,8 +342,8 @@ toNearest pt pts maxl = do
     let u = stUpper st
         w = water . stState $ st
         ptsset = S.fromList pts
+    -- debug $ "Astar from " ++ show pt ++ " to " ++ show pts ++ ":"
     mpath <- liftIO $ aStar (natfoDirs w u) (listDistance u pts) pt (`S.member` ptsset) (Just maxl)
-    modify $ \s -> s { stCrtASt = stCrtASt s - 1 }
     case mpath of
         Nothing    -> return Nothing
         Just path' -> if null path'
@@ -335,6 +351,7 @@ toNearest pt pts maxl = do
             else do
               let np = piPoint $ head path'
                   path = reverse path'
+              -- debug $ "Path: " ++ show path
               return $ Just (np, path)
     where listDistance u list p = minimum $ map (distance u p) list
 
@@ -390,6 +407,7 @@ smellBlood pt = do
   let mx   = stCrtASt st	-- we are limited by aStar searches
       hots = stHotSpots st
   modify $ \s -> s { stCrtASt = mx - 1 }
+  -- debug $ "smellBlo: " ++ show pt ++ ", stCrtASt = " ++ show (mx-1)
   if mx <= 0 || null hots
      then return False
      else do
@@ -428,8 +446,10 @@ gotoFood pt = do
 
 -- When boring:
 rest pt = do
-    -- act <- choose [(1, maiRar pt), (3, explore pt), (7, moveRandom pt)]
-    act <- choose [(3, explore pt), (7, moveRandom pt)]
+    ast <- gets stCrtASt
+    act <- if ast > 0
+              then choose [(7, explore pt), (3, moveRandom pt)]
+              else return $ moveRandom pt
     act
 
 moveToList :: Point -> [Point] -> MyGame Bool
@@ -558,17 +578,19 @@ gotoPoint isFood pt to = do
       u = stUpper st
       mx = stCrtASt st
   modify $ \s -> s { stCrtASt = mx - 1 }
+  -- debug $ "gotoPoin: " ++ show pt ++ ", stCrtASt = " ++ show (mx-1)
   if mx <= 0
      then return False
      else do
+       -- debug $ "Astar from " ++ show pt ++ " to " ++ show to ++ ":"
        mpath <- liftIO $ aStar (natfoDirs w u) (distance u to) pt (== to) Nothing
-       modify $ \s -> s { stCrtASt = mx - 1 }
        case mpath of
          Nothing    -> return False
          Just path' -> do
            let path = reverse path'
                plan = Plan { plPrio = Green, plTarget = to, plPath = path,
                              plPLen = sum (map piTimes path), plWait = maxPlanWait }
+           -- debug $ "Path: " ++ show path
            -- when isFood $ modify $ \s -> s { stFrFood = S.delete to (stFrFood s) }
            executePlan pt plan
 
@@ -595,7 +617,11 @@ findJumpPoint w u pt d = do
     let p = move u pt d
     b <- readArray w p
     if b then return Nothing
-         else return (Just (p, JPInfo { jpDir = d, jpCost = 1, jpDirs = [] }))
+         else return (Just (p, JPInfo { jpDir = d, jpCost = 1, jpDirs = delete (oppo d) allDirs }))
+    where oppo North = South
+          oppo East  = West
+          oppo South = North
+          oppo West  = East
 
 -- Given a point, give the neighbour points, where we could find food
 -- We don't even check for water, as food will for sure not be there
@@ -787,5 +813,5 @@ bitMap    w u = filterM (            unsafeRead w . index ((0, 0), u) . snd)
 notBitMap w u = filterM (liftM not . unsafeRead w . index ((0, 0), u) . snd)
 
 debug :: String -> MyGame ()
--- debug s = liftIO $ hPutStrLn stderr s
-debug _ = return ()
+debug s = liftIO $ hPutStrLn stderr s
+-- debug _ = return ()

@@ -23,20 +23,20 @@ class OpenClass op where
     opInsert    :: Point -> OpInfo -> op -> op	-- insert (or replace) point
 
 data JPInfo = JPInfo {
-                  jpDir   :: Dir,	-- direction from parent to this point
-                  jpCost  :: Int,	-- the cost (steps) from parent to this point
-                  jpDirs  :: [Dir]	-- directions for forced neighbours
+                  jpDir   :: !Dir,	-- direction from parent to this point
+                  jpCost  :: {-# UNPACK #-} !Int,	-- the cost (steps) from parent to this point
+                  jpDirs  :: ![Dir]	-- directions for forced neighbours
               }
 data OpInfo = OpInfo {
-                  oiG     :: Int,	-- the current cost
-                  oiF     :: Int,	-- the total cost (estimated)
-                  oiPath  :: [PathInfo],	-- the path so far (reverse)
+                  oiG     :: {-# UNPACK #-} !Int,	-- the current cost
+                  oiF     :: {-# UNPACK #-} !Int,	-- the total cost (estimated)
+                  oiPath  :: ![PathInfo],	-- the path so far (reverse)
                   oiJPInfo:: Maybe JPInfo	-- the info for jump poits
              }
 data PathInfo = PathInfo {
-                    piPoint :: Point,	-- the next point
-                    piDir   :: Dir,	-- next direction to take
-                    piTimes :: Int	-- how many times
+                    piPoint :: {-# UNPACK #-} !Point,	-- the next point
+                    piDir   :: !Dir,	-- next direction to take
+                    piTimes :: {-# UNPACK #-} !Int	-- how many times
                 } deriving Show
 type Closed = S.Set Point
 
