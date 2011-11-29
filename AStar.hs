@@ -23,9 +23,8 @@ class OpenClass op where
     opInsert    :: Point -> OpInfo -> op -> op	-- insert (or replace) point
 
 data JPInfo = JPInfo {
-                  jpDir   :: !Dir,	-- direction from parent to this point
-                  jpCost  :: {-# UNPACK #-} !Int,	-- the cost (steps) from parent to this point
-                  jpDirs  :: ![Dir]	-- directions for forced neighbours
+                  jpDir   :: !Dir,			-- direction from parent to this point
+                  jpCost  :: {-# UNPACK #-} !Int	-- the cost (steps) from parent to this point
               }
 data OpInfo = OpInfo {
                   oiG     :: {-# UNPACK #-} !Int,	-- the current cost

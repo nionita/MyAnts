@@ -64,9 +64,10 @@ type LibGrad  = M.Map Point [EDir]
 
 -- Some constants and constant-like definitions:
 msReserve = 150		-- reserve time for answer back (ms)
-msDecrAst = 320		-- under this time we decrese the AStar searches per turn
-msIncrAst = 460		-- over this time we increse the AStar searches per turn
-maxMaxASt = 50		-- maximum AStar searches per turn
+msDecrAst = 300		-- under this time we decrese the AStar searches per turn
+msIncrAst = 450		-- over this time we increse the AStar searches per turn
+maxMaxASt = 60		-- maximum AStar searches per turn
+maxJumps  = 20		-- maximum jump length for jump point search
 attMajority = 2		-- used when attacking many to many
 maxPlanWait = 5		-- how long to wait in a plan when path is blocked
 checkEasyFood = 10	-- how often to check for easy food?
@@ -342,8 +343,9 @@ toNearest pt pts maxl = do
     let u = stUpper st
         w = water . stState $ st
         ptsset = S.fromList pts
+        ff = (`S.member` ptsset)	-- fulfill function (target hit condition)
     -- debug $ "Astar from " ++ show pt ++ " to " ++ show pts ++ ":"
-    mpath <- liftIO $ aStar (natfoDirs w u) (listDistance u pts) pt (`S.member` ptsset) (Just maxl)
+    mpath <- liftIO $ aStar (natfoDirs w u ff) (listDistance u pts) pt ff (Just maxl)
     case mpath of
         Nothing    -> return Nothing
         Just path' -> if null path'
@@ -582,8 +584,9 @@ gotoPoint isFood pt to = do
   if mx <= 0
      then return False
      else do
+       let ff = (== to)	-- target hit condition
        -- debug $ "Astar from " ++ show pt ++ " to " ++ show to ++ ":"
-       mpath <- liftIO $ aStar (natfoDirs w u) (distance u to) pt (== to) Nothing
+       mpath <- liftIO $ aStar (natfoDirs w u ff) (distance u to) pt ff Nothing
        case mpath of
          Nothing    -> return False
          Just path' -> do
@@ -600,28 +603,40 @@ validDirs :: BitMap -> Point -> [Dir] -> Point -> IO [(Dir, Point)]
 validDirs w u ds pt = notBitMap w u $ map (\d -> (d, move u pt d)) ds
 
 -- For jump point search: only natural & forced neighbours are generated
-natfoDirs :: BitMap -> Point -> (Point, Maybe JPInfo) -> IO [(Point, JPInfo)]
-natfoDirs w u (pt, Nothing) = map pathInfoToPJPInfo <$> validDirs w u allDirs pt
-natfoDirs w u (pt, Just jpi) = do
-    mjp <- findJumpPoint w u pt (jpDir jpi)
-    ts  <- map pathInfoToPJPInfo <$> validDirs w u (jpDirs jpi) pt
+natfoDirs :: BitMap -> Point -> (Point -> Bool) -> (Point, Maybe JPInfo) -> IO [(Point, JPInfo)]
+natfoDirs w u fulf (pt, Nothing)  = map pathInfoToPJPInfo <$> validDirs w u allDirs pt
+natfoDirs w u fulf (pt, Just jpi) = do
+    let d = jpDir jpi
+    mjp <- findJumpPoint w u fulf pt d 1				-- the jump point
+    ts  <- map pathInfoToPJPInfo <$> validDirs w u (lrDirs d) pt	-- the turns
     return $ case mjp of
         Just jp -> jp : ts
         _       -> ts
 
 pathInfoToPJPInfo :: (Dir, Point) -> (Point, JPInfo)
-pathInfoToPJPInfo (d, p) = (p, JPInfo { jpDir = d, jpCost = 1, jpDirs = [] })
+pathInfoToPJPInfo (d, p) = (p, JPInfo { jpDir = d, jpCost = 1 })
 
-findJumpPoint :: BitMap -> Point -> Point -> Dir -> IO (Maybe (Point, JPInfo))
-findJumpPoint w u pt d = do
+findJumpPoint :: BitMap -> Point -> (Point -> Bool) -> Point -> Dir -> Int
+              -> IO (Maybe (Point, JPInfo))
+findJumpPoint w u fulf pt d k = do
     let p = move u pt d
-    b <- readArray w p
-    if b then return Nothing
-         else return (Just (p, JPInfo { jpDir = d, jpCost = 1, jpDirs = delete (oppo d) allDirs }))
-    where oppo North = South
-          oppo East  = West
-          oppo South = North
-          oppo West  = East
+    if fulf p
+       then return $ Just (p, jpi)	-- end points are jump points
+       else do
+           b <- readArray w p
+           if b then return Nothing	-- dead end
+                else if k >= maxJumps
+                        then return $ Just (p, jpi)	-- reached max jump length
+                        else do
+                            blr <- bitMap w u $ map (\d -> (d, move u pt d)) (lrDirs d)
+                            if null blr
+                               then findJumpPoint w u fulf p d (k+1)
+                               else return $ Just (p, jpi)
+    where jpi = JPInfo { jpDir = d, jpCost = k }
+
+lrDirs :: Dir -> [Dir]
+lrDirs d = [dirdir succ d, dirdir pred d]
+    where dirdir f = toEnum . (`mod` 4) . f . fromEnum
 
 -- Given a point, give the neighbour points, where we could find food
 -- We don't even check for water, as food will for sure not be there
