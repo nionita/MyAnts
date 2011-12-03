@@ -675,9 +675,9 @@ moveRandom pt = do
     [(d, _)] -> orderMove pt d "random"
     _   -> do
       cst <- gets stCanStay
-      let low = if cst then 0 else 1
+      let low = if cst then -4 else 1
       r <- liftIO $ randomRIO (low, length vs)
-      if r == 0
+      if r <= 0
          then markWait pt	-- means: wait
          else orderMove pt (fst $ vs !! (r - 1)) "random"
 
@@ -695,13 +695,13 @@ explore pt = do
   case vs of
     []       -> return False		-- should not come here
     [(d, _)] -> orderMove pt d "explore"
-    _        -> go bound 2	-- try 3 times
+    _        -> go bound 3	-- try 3 times
     where go u 0 = return False
           go u i = do
-             rx <- liftIO $ randomRIO (-20, 20)
-             ry <- liftIO $ randomRIO (-20, 20)
+             rx <- liftIO $ randomRIO (-30, 30)
+             ry <- liftIO $ randomRIO (-30, 30)
              let n = sumPoint u pt (rx, ry)
-             if distance u pt n <= 5	-- not too near
+             if distance u pt n <= 7	-- not too near
                 then go u i
                 else do
                   se <- seenPoint n

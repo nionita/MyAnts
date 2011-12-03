@@ -57,7 +57,7 @@ type Food  = S.Set Point
 
 -- Wrap the coordinates
 (%!%) :: Point -> Point -> Point
-(%!%) (pr, pc) (ur, uc) = 
+(%!%) (!pr, !pc) (!ur, !uc) = 
   let !modCol = 1 + uc
       !modRow = 1 + ur
       !ixCol  = pc `mod` modCol
@@ -146,7 +146,7 @@ finishTurn gp ords = do
   -- when (not $ null dubs) $ do
   --     hPutStrLn stderr "Dubs:"
   --     mapM_ (hPutStrLn stderr . show) dubs
-  -- performGC
+  performGC
 
 tuplify2 :: [a] -> (a, a)
 tuplify2 (x:y:_) = (x, y)

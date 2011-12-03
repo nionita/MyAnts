@@ -49,14 +49,14 @@ aStar :: (Monad m, Functor m)
 aStar fions heur from fulfilled mmax = go iopen S.empty
     where oii = OpInfo { oiG = 0, oiF = heur from, oiPath = [], oiJPInfo = Nothing }
           iopen = opSingleton from oii :: BiMap
-          go open closed
+          go !open closed
              | opIsEmpty open = return Nothing	-- no path
              | fulfilled op   = return rez
              | Just mx <- mmax, oiG oi + heur op >= mx	-- we reached maximum length
                               = return Nothing
              | otherwise = do
-                 let !closed' = S.insert op closed
-                 !open' <- expandNode fions heur o os closed'
+                 let closed' = S.insert op closed
+                 open' <- expandNode fions heur o os closed'
                  go open' closed'
              where (o@(op, oi), os) = opRemoveMin open
                    rez = Just $ oiPath oi
@@ -68,7 +68,7 @@ expandNode :: (OpenClass op, Monad m, Functor m)
       -> op			-- the open "list"
       -> Closed			-- the closed "list"
       -> m op			-- returns the new open list
-expandNode fions heur (!ex, oi) open closed = foldl' go open <$> fions (ex, oiJPInfo oi)
+expandNode fions heur (!ex, !oi) open !closed = foldl' go open <$> fions (ex, oiJPInfo oi)
     where go op (p, _) | p `S.member` closed = op
           go op dp@(p, jpi)
               = let !tent_g = oiG oi + jpCost jpi	-- proposed new cost
@@ -122,7 +122,7 @@ biMapRetrieve :: Point -> BiMap -> Maybe OpInfo
 biMapRetrieve p bi = M.lookup p (perPoint bi)
 
 biMapInsert :: Point -> OpInfo -> BiMap -> BiMap
-biMapInsert p oi bi = BiMap { perPoint = pp', perValue = pv'' }
+biMapInsert p oi bi = pp' `seq` pv'' `seq` BiMap { perPoint = pp', perValue = pv'' }
     where pp = perPoint bi
           pv = perValue bi
           v  = oiF oi
