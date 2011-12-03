@@ -230,6 +230,7 @@ extOrderMove (pt, edir) = do
 libGrad :: Point -> [EDir] -> MyGame ()
 libGrad p es = modify $ \s -> s { stLibGrad = M.insert p es (stLibGrad s) }
 
+-- hotSpot (us, tm) = head us
 hotSpot (us, tm) = gravCenter $ us ++ concat (M.elems tm)
 
 makeHotSpot fz = do
@@ -344,7 +345,7 @@ toNearest pt pts maxl = do
         w = water . stState $ st
         ptsset = S.fromList pts
         ff = (`S.member` ptsset)	-- fulfill function (target hit condition)
-    -- debug $ "Astar from " ++ show pt ++ " to " ++ show pts ++ ":"
+    debug $ "Astar from " ++ show pt ++ " to " ++ show pts ++ ":"
     mpath <- liftIO $ aStar (natfoDirs w u ff) (listDistance u pts) pt ff (Just maxl)
     case mpath of
         Nothing    -> return Nothing
@@ -585,7 +586,7 @@ gotoPoint isFood pt to = do
      then return False
      else do
        let ff = (== to)	-- target hit condition
-       -- debug $ "Astar from " ++ show pt ++ " to " ++ show to ++ ":"
+       debug $ "Astar from " ++ show pt ++ " to " ++ show to ++ ":"
        mpath <- liftIO $ aStar (natfoDirs w u ff) (distance u to) pt ff Nothing
        case mpath of
          Nothing    -> return False
@@ -704,8 +705,9 @@ explore pt = do
              if distance u pt n <= 7	-- not too near
                 then go u i
                 else do
+                  wa <- isWater n
                   se <- seenPoint n
-                  if se then go u (i-1) else gotoPoint False pt n
+                  if wa || se then go u (i-1) else gotoPoint False pt n
 
 sortFreeAnts :: MyState -> [Point]
 sortFreeAnts st

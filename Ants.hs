@@ -41,12 +41,14 @@ import Data.Array.IO
 import qualified Data.ByteString.Char8 as B
 import Data.Char (digitToInt, toUpper)
 import Data.List (delete, sortBy, lookup, foldl')
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, fromJust)
 import qualified Data.Map as M
 import Data.Ord (comparing)
 import qualified Data.Set as S
 import Data.Time.Clock
 import System.IO
+import System.Random (mkStdGen, setStdGen)
+import System.Environment (getArgs)
 import System.Mem (performGC)
 
 -- type synonyms
@@ -102,6 +104,7 @@ data GameParams = GameParams
   , viewradius2 :: Int
   , attackradius2 :: Int
   , spawnradius2 :: Int
+  , seed :: Int
   } deriving (Show)
 
 modDistance :: Int -> Int -> Int -> Int
@@ -146,7 +149,7 @@ finishTurn gp ords = do
   -- when (not $ null dubs) $ do
   --     hPutStrLn stderr "Dubs:"
   --     mapM_ (hPutStrLn stderr . show) dubs
-  performGC
+  -- performGC
 
 tuplify2 :: [a] -> (a, a)
 tuplify2 (x:y:_) = (x, y)
@@ -175,6 +178,9 @@ addDead gs _ = gs
 
 initialGameState :: GameParams -> IO (GameState a)
 initialGameState gp = do
+  when (seed gp /= 0) $ do
+    let gen = mkStdGen (seed gp)
+    setStdGen gen
   time <- getCurrentTime
   w <- newArray ((0, 0), (rows gp - 1, cols gp - 1)) False
   let gs = GameState { water = w, waterP = [], ants = [], ours = [], food = S.empty,
@@ -200,7 +206,7 @@ updateGameState gp gs s
 -- Reads input from the engine and stores in game state
 updateGame :: GameParams -> GameState a -> IO (GameState a)
 updateGame gp gs = do
-  line <- B.getLine
+  line <- getLineOrEof
   process line
   where 
     process line
@@ -234,10 +240,10 @@ gatherParamInput = gatherInput' []
   where
     gatherInput' :: [B.ByteString] -> IO [B.ByteString]
     gatherInput' xs = do
-      line <- B.getLine
-      if B.pack "ready" /= line
-        then gatherInput' (line:xs)
-        else return xs
+      line <- getLineOrEof
+      if B.pack "ready" `B.isPrefixOf` line
+        then return xs
+        else gatherInput' (line:xs)
   
 createParams :: [(B.ByteString, B.ByteString)] -> GameParams
 createParams s =
@@ -250,6 +256,7 @@ createParams s =
       vr2 = lookup' $ B.pack "viewradius2"
       ar2 = lookup' $ B.pack "attackradius2"
       sr2 = lookup' $ B.pack "spawnradius2"
+      see = lookup' $ B.pack "player_seed"
   in GameParams { loadtime      = lt
                 , turntime      = tt
                 , rows          = rs
@@ -258,6 +265,7 @@ createParams s =
                 , viewradius2   = vr2
                 , attackradius2 = ar2
                 , spawnradius2  = sr2
+                , seed          = see
                 }
 
 endGame :: IO ()
@@ -269,34 +277,55 @@ endGame = do
   -- hPutStrLn stderr $ "Final scores: " ++ unwords (tail $ words scores)
   -- TODO print 
 
-gameLoop :: GameParams -> GameState a
+gameLoop :: Maybe Int -> GameParams -> GameState a
          -> (GameParams -> GameState a -> IO ([Order], GameState a))
          -> IO ()
-gameLoop gp gs doTurn = do
-  line <- B.getLine
+gameLoop mendt gp gs doTurn = do 
+  line <- getLineOrEof
   gameLoop' line
   where
     gameLoop' line
       | B.pack "turn" `B.isPrefixOf` line = do 
           B.hPutStrLn stderr line
-          gs1 <- updateGame gp gs
-          (orders, gs2) <- doTurn gp gs1
-          mapM_ issueOrder orders
-          finishTurn gp orders
-          gameLoop gp gs2 doTurn
+          let ws = B.words line
+              tn = fst . fromJust $ B.readInt $ head $ tail ws
+              run = do
+                  gs1 <- updateGame gp gs
+                  (orders, gs2) <- doTurn gp gs1
+                  mapM_ issueOrder orders
+                  finishTurn gp orders
+                  gameLoop mendt gp gs2 doTurn
+          case mendt of
+            Just et -> if tn >= et then endGame else run
+            Nothing -> run
       | B.pack "end" `B.isPrefixOf` line = endGame
       | otherwise = do
           B.hPutStrLn stderr $ B.pack "Input: " `B.append` line
-          gameLoop gp gs doTurn -- ignore line
+          gameLoop mendt gp gs doTurn -- ignore line
+
+getLineOrEof = do
+  eof <- isEOF
+  if eof then return (B.pack "end") else B.getLine
+    -- do
+    --   lin <- B.getLine
+    --   B.hPutStrLn stderr lin
+    --   return lin
 
 game :: (GameParams -> GameState a -> IO ([Order], GameState a)) -> IO ()
 game doTurn = do
+  endt <- getEndTurn
   paramInput <- gatherParamInput
   let gp = createParams $ map (tuplify2 . B.words) paramInput
   hPutStrLn stderr $ "Params:\n" ++ show gp
   gs <- initialGameState gp
   finishTurn gp [] -- signal done with setup
-  gameLoop gp gs doTurn
+  gameLoop endt gp gs doTurn
+
+getEndTurn = do
+  args <- getArgs
+  case args of
+    (a:_) -> return $ Just $ read a
+    _     -> return Nothing
 
 getFoods :: Food -> [Point] -> [Point]
 getFoods food = filter (`S.member` food)
