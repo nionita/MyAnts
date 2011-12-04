@@ -12,6 +12,7 @@ where
 import Data.List
 import qualified Data.Map as M
 import qualified Data.Set as S
+import Data.Ord (comparing)
 
 import Ants
 
@@ -47,7 +48,8 @@ nextTurn bound dist dist1 gfun epar us toMove = getMaxs cf cfs
 ourMoves :: Point -> Int -> Int -> GenFun -> EvalPars -> [Point] -> ToMove
          -> [(FPoint, Config)]
 ourMoves bound dist dist1 gfun epar us toMove = do
-    myc <- nextAnt True near' near1 gfun 0 us toMove ([], M.empty)
+    let amvs = sortBy (comparing (fst . snd)) $ map (interMove near' near1 gfun 0 toMove M.empty) us
+    myc <- nextAnt True near' near1 gfun 0 amvs toMove ([], M.empty)
     let ocfs = nextPlayer near' near1 gfun toMove myc
         avg  = average (pes epar) (opt epar) $ map (evalOutcome near' epar . snd) ocfs
         sec  = if agr epar then inv else 0
@@ -67,30 +69,36 @@ nextPlayer near near1 gfun toMove conf
     | otherwise     = do
         let (pla, pants) = M.findMin toMove
             toMove' = M.delete pla toMove
-        nextAnt False near near1 gfun pla pants toMove' conf
+            amvs = sortBy (comparing (fst . snd))
+                      $ map (interMove near near1 gfun pla toMove (snd conf)) pants
+        nextAnt False near near1 gfun pla amvs toMove' conf
 
 -- Choose next ant to move, make all valid (and interesting) moves
 -- Functions near and near1 are used to prune uninteresting moves
 -- near ist the fight distance, near1 ist fight distance "+ 1" (i.e. one move
 -- from the fight distance)
-nextAnt :: Bool -> DstFun -> DstFun -> GenFun -> Int -> [Point] -> ToMove -> Config -> [Config]
-nextAnt stop near near1 gfun _   []     toMove conf
+nextAnt :: Bool -> DstFun -> DstFun -> GenFun -> Int -> [(Point, (Int, [(EDir, Point)]))]
+        -> ToMove -> Config -> [Config]
+nextAnt stop near near1 gfun _   []                 toMove conf
     = if stop then return conf else nextPlayer near near1 gfun toMove conf
-nextAnt stop near near1 gfun pla (a:as) toMove (acs, mp) = do
-    (d, p) <- interMove near near1 gfun a pla toMove mp
+nextAnt stop near near1 gfun pla ((a, (_, mvs)):as) toMove (acs, mp) = do
+    (d, p) <- freeMove mp mvs
     let acts = (a, d) : acs
         final = case d of
-                  Any ds    -> mp
-                  otherwise -> M.insert p pla mp
+                  Any ds -> mp
+                  _      -> M.insert p pla mp
     nextAnt stop near near1 gfun pla as toMove (acts, final)
 
 extend :: (Point -> [(Dir, Point)]) -> Point -> [(EDir, Point)]
 extend f p = (Stay, p) : map (\(d, p') -> (Go d, p')) (f p)
 
 -- Filter all possible moves: must not go to a busy point and must be interesting
-interMove :: DstFun -> DstFun -> GenFun -> Point -> Int -> ToMove -> PoiMap -> [(EDir, Point)]
-interMove near near1 gfun a pla toMove pm = go [] [] $ extend gfun a
-    where go dcc acc [] = if null acc then dcc else (Any acc, a) : dcc
+interMove :: DstFun -> DstFun -> GenFun -> Int -> ToMove -> PoiMap
+          -> Point -> (Point, (Int, [(EDir, Point)]))
+interMove near near1 gfun pla toMove pm a = go [] [] $ extend gfun a
+    where go dcc acc [] = if null acc
+                             then (a, (length dcc, dcc))
+                             else (a, (1 + length dcc, (Any acc, a) : dcc))
           go dcc acc (m@(d, p):ms) = case M.lookup p pm of
              Just _  -> go dcc acc ms
              Nothing -> if any (near1 p) tml || any (near p) cfl
@@ -99,6 +107,9 @@ interMove near near1 gfun a pla toMove pm = go [] [] $ extend gfun a
           -- tml = concatMap snd $ filter ((/= pla) . fst) $ M.assocs toMove
           tml = enemiesOfPlayer pla toMove
           cfl = map fst $ filter ((/= pla) . snd) $ M.assocs pm
+
+freeMove :: PoiMap -> [(EDir, Point)] -> [(EDir, Point)]
+freeMove pm = filter (\(_, p) -> M.lookup p pm == Nothing)
 
 -- Having a final configuration we want to evaluate the outcome
 -- For now we just make the difference: enemy loss - our loss

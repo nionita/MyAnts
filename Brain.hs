@@ -117,7 +117,7 @@ doTurn gp gs = do
   restTime <- timeRemaining gp gs
   hPutStrLn stderr $ "Time remaining (ms) after fight: " ++ show restTime
   let fas = sortFreeAnts st1	-- the ones near important points first
-  stf <- execState (freeAnts 1 fas) st1	-- then the free ants
+  stf <- execState (freeAnts restTime fas) st1	-- then the free ants
   restTime <- timeRemaining gp gs
   let plans = M.fromList $ stPlans stf
       astpt = aStarNextTurn (peMaxPASt npers) (stCrtASt stf) restTime
@@ -153,17 +153,14 @@ cleanDeadPlans gs pe =
 -- makeOrders :: [Point] -> MyGame [Order]
 freeAnts :: Int -> [Point] -> MyGame ()
 freeAnts _ [] = return ()
-freeAnts i points = do
+freeAnts tr0 points = do
   st <- get
   let gp = stPars  st
       gs = stState st
-  -- tr <- if i `mod` 10 == 0	-- to avoid to take the time so often
-  --          then return msReserve
-  --          else lift $ timeRemaining gp gs
   tr <- lift $ timeRemaining gp gs
   when (tr >= msReserve) $ do
       perAnt $ head points
-      freeAnts (i+1) $ tail points
+      freeAnts tr $ tail points
 
 -- Our ants not involved in any fight zone
 myFreeAnts :: [Point] -> [Point] -> [Point]
@@ -182,8 +179,18 @@ fightAnts fs
             u  = stUpper st
             r1 = hellSteps (attackradius2 gp) 1
             r0  = attackradius2 gp
-        mapM_ (perFightZone r0 r1) fs'
+        -- mapM_ (perFightZone r0 r1) fs'
+        go r0 r1 fs'
     where fs' = filter (\(ps, tm) -> length ps + points tm <= zoneMax) fs
+          go _ _ [] = return ()
+          go a b (fz:fzs) = do
+             st <- get
+             let gp = stPars st
+                 gs = stState st
+             tr <- lift $ timeRemaining gp gs
+             when (tr >= msReserve) $ do
+                 perFightZone a b fz
+                 go a b fzs
 
 perFightZone r0 r1 fz@(us, themm) = do
     ho <- makeHotSpot fz
@@ -230,8 +237,8 @@ extOrderMove (pt, edir) = do
 libGrad :: Point -> [EDir] -> MyGame ()
 libGrad p es = modify $ \s -> s { stLibGrad = M.insert p es (stLibGrad s) }
 
--- hotSpot (us, tm) = head us
-hotSpot (us, tm) = gravCenter $ us ++ concat (M.elems tm)
+hotSpot (us, tm) = head us
+-- hotSpot (us, tm) = gravCenter $ us ++ concat (M.elems tm)
 
 makeHotSpot fz = do
     let gc = hotSpot fz
@@ -345,7 +352,7 @@ toNearest pt pts maxl = do
         w = water . stState $ st
         ptsset = S.fromList pts
         ff = (`S.member` ptsset)	-- fulfill function (target hit condition)
-    debug $ "Astar from " ++ show pt ++ " to " ++ show pts ++ ":"
+    -- debug $ "Astar from " ++ show pt ++ " to " ++ show pts ++ ":"
     mpath <- liftIO $ aStar (natfoDirs w u ff) (listDistance u pts) pt ff (Just maxl)
     case mpath of
         Nothing    -> return Nothing
@@ -586,7 +593,7 @@ gotoPoint isFood pt to = do
      then return False
      else do
        let ff = (== to)	-- target hit condition
-       debug $ "Astar from " ++ show pt ++ " to " ++ show to ++ ":"
+       -- debug $ "Astar from " ++ show pt ++ " to " ++ show to ++ ":"
        mpath <- liftIO $ aStar (natfoDirs w u ff) (distance u to) pt ff Nothing
        case mpath of
          Nothing    -> return False
