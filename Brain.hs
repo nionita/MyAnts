@@ -102,7 +102,7 @@ doTurn gp gs = do
                    nseen <- newArray b False
                    return $ Persist { peSeen = nseen, pePlMemo = M.empty,
                                       peEnHills = [], peMaxPASt = maxMaxASt `div` 2,
-                                      peStatsFi = newStats 1 20, peStatsAs = newStats 5 10 }
+                                      peStatsFi = newStats 1 20, peStatsAs = newStats 5 20 }
   updateSeen gs (peSeen npers)
   -- these are enemy hills we see this turn
   let hinow = map fst $ filter ((/= 0) . snd) $ hills gs
@@ -177,6 +177,7 @@ freeAnts points = do
   let lt = stTimeRem st
       lp = stCParam st
       fis = addParVal (stStatsAs st) lp (lt - tr)
+  modify $ \s -> s { stTimeRem = tr }
   when (lp > 0) $ modify $ \s -> s { stStatsAs = fis, stCParam = 0 }
   when (tr >= msReserve) $ do
       let deltat = lt - tr
