@@ -71,7 +71,7 @@ type PlanMemo = M.Map Point Plan
 type LibGrad  = M.Map Point [EDir]
 
 -- Some constants and constant-like definitions:
-msReserve = 150		-- reserve time for answer back (ms)
+msReserve = 120		-- reserve time for answer back (ms)
 msDecrAst = 300		-- under this time we decrese the AStar searches per turn
 msIncrAst = 450		-- over this time we increse the AStar searches per turn
 maxMaxASt = 60		-- maximum AStar searches per turn
@@ -79,7 +79,7 @@ maxJumps  = 20		-- maximum jump length for jump point search
 attMajority = 2		-- used when attacking many to many
 maxPlanWait = 5		-- how long to wait in a plan when path is blocked
 checkEasyFood = 10	-- how often to check for easy food?
-zoneMax      = 9	-- max ants in a zone fight
+zoneMax      = 8	-- max ants in a zone fight
 maxSmellPath = 50	-- max steps for smell blood paths
 cntLastAttack = 200	-- when we are so many, go to last attack
 stepsToBlood = 15	-- afterwhich we reconsider
@@ -102,7 +102,7 @@ doTurn gp gs = do
                    nseen <- newArray b False
                    return $ Persist { peSeen = nseen, pePlMemo = M.empty,
                                       peEnHills = [], peMaxPASt = maxMaxASt `div` 2,
-                                      peStatsFi = newStats 1 20, peStatsAs = newStats 5 20 }
+                                      peStatsFi = newStats 1 25, peStatsAs = newStats 10 25 }
   updateSeen gs (peSeen npers)
   -- these are enemy hills we see this turn
   let hinow = map fst $ filter ((/= 0) . snd) $ hills gs
@@ -137,10 +137,12 @@ doTurn gp gs = do
       orders = stOrders stf
   hPutStrLn stderr $ "Time remaining (ms): " ++ show restTime
                         ++ ", ants: " ++ show (stOurCnt stf)
-                        ++ ", A*: rest: " ++ show (stCrtASt stf) ++ ", next: " ++ show astpt
+                        -- ++ ", A*: rest: " ++ show (stCrtASt stf) ++ ", next: " ++ show astpt
   let gsf = gs { ants = [], ours = [], foodP = [], userState = Just fpers }
       tn  = turnno gs
-  when (tn `mod` 25 == 0) $ do
+  when (tn `mod` 100 == 0) $ do
+    hPutStrLn stderr "Statistics for fight:"
+    hPutStrLn stderr $ showStats (stStatsFi stf)
     hPutStrLn stderr "Statistics for AStar:"
     hPutStrLn stderr $ showStats (stStatsAs stf)
   return (orders, gsf)
@@ -179,11 +181,12 @@ freeAnts points = do
       fis = addParVal (stStatsAs st) lp (lt - tr)
   modify $ \s -> s { stTimeRem = tr }
   when (lp > 0) $ modify $ \s -> s { stStatsAs = fis, stCParam = 0 }
-  when (tr >= msReserve) $ do
-      let deltat = lt - tr
+  let deltat = tr - msReserve
+  when (deltat > 0) $ do
       modify $ \s -> s { stDeltat = deltat }
       perAnt $ head points
-      freeAnts $ tail points
+      return ()
+  freeAnts $ tail points
 
 -- Our ants not involved in any fight zone
 myFreeAnts :: [Point] -> [Point] -> [Point]
@@ -206,14 +209,19 @@ fightAnts fs
         go r0 r1 fs'
     where fs' = filter (\(ps, tm) -> length ps + points tm <= zoneMax) fs
           go _ _ [] = return ()
-          go a b (fz:fzs) = do
+          go a b (fz@(ps, tm):fzs) = do
              st <- get
              let gp = stPars st
                  gs = stState st
              tr <- lift $ timeRemaining gp gs
-             when (tr >= msReserve) $ do
-                 perFightZone a b fz
-                 go a b fzs
+             let lt = stTimeRem st
+                 lp = length ps + points tm
+                 fis = addParVal (stStatsFi st) lp (lt - tr)
+             modify $ \s -> s { stTimeRem = tr }
+             when (lp > 0) $ modify $ \s -> s { stStatsFi = fis }
+             let deltat = tr - msReserve
+             when (deltat > 0) $ perFightZone a b fz
+             go a b fzs
 
 perFightZone r0 r1 fz@(us, themm) = do
     ho <- makeHotSpot fz
@@ -293,13 +301,15 @@ perAnt pt = do
 -- If not, return False (to try next action)
 -- This should be cheaper than checking other conditions first
 ifAStar :: MyGame Bool -> MyGame Bool
-ifAStar act = do
+ifAStar act = act
+{--
     ast <- gets stCrtASt
     if ast > 0
        then act
        else do
            when (ast == 0) $ modify $ \s -> s { stCrtASt = -1 }
            return False
+--}
 
 getGoal :: Point -> MyGame Bool
 getGoal pt =
@@ -360,7 +370,7 @@ easyFood pt maxl = do
              -- take the nearest food in visibility radius
              u  = stUpper st
              gp = stPars st
-             mx = stCrtASt st	-- we are limited by aStar searches
+             -- mx = stCrtASt st	-- we are limited by aStar searches
              foods = map fst $ takeWhile ((<= viewRadius gp) . snd) $ sortByDist id u pt fo
              deltat = stDeltat st
              stats = stStatsAs st
@@ -368,10 +378,12 @@ easyFood pt maxl = do
          if null foods
             then return Nothing
             else do
-               modify $ \s -> s { stCrtASt = mx - 1 }
+               -- modify $ \s -> s { stCrtASt = mx - 1 }
                -- if mx <= 0 || estimateTime stats (viewRadius gp) > deltat
-               if estimateTime stats (viewRadius gp) > deltat
-                  then return Nothing
+               let et = estimateTime stats ep
+                   ep = viewRadius gp
+               if et > deltat
+                  then wanted "easyFood" ep et deltat >> return Nothing
                   else do
                       putLastAsParam (viewRadius gp)
                       toNearest pt foods maxl
@@ -445,7 +457,7 @@ razeAttac pt = do
 smellBlood :: Point -> MyGame Bool
 smellBlood pt = do
   st <- get
-  let mx   = stCrtASt st	-- we are limited by aStar searches
+  let -- mx   = stCrtASt st	-- we are limited by aStar searches
       hots = stHotSpots st
       deltat = stDeltat st
       stats = stStatsAs st
@@ -453,10 +465,12 @@ smellBlood pt = do
   if null hots
      then return False
      else do
-        modify $ \s -> s { stCrtASt = mx - 1 }
+        -- modify $ \s -> s { stCrtASt = mx - 1 }
         -- if mx <= 0 || estimateTime stats maxSmellPath > deltat
-        if estimateTime stats maxSmellPath > deltat
-           then return False
+        let et = estimateTime stats maxSmellPath
+            ep = maxSmellPath
+        if et > deltat
+           then wanted "smellBlood" ep et deltat
            else do
               mth <- toNearest pt hots maxSmellPath
               putLastAsParam maxSmellPath
@@ -494,10 +508,11 @@ gotoFood pt = do
 
 -- When boring:
 rest pt = do
-    ast <- gets stCrtASt
-    act <- if ast > 0
-              then choose [(7, explore pt), (3, moveRandom pt)]
-              else return $ moveRandom pt
+    -- ast <- gets stCrtASt
+    -- act <- if ast > 0
+    --           then choose [(7, explore pt), (3, moveRandom pt)]
+    --           else return $ moveRandom pt
+    act <- choose [(7, explore pt), (3, moveRandom pt)]
     act
 
 moveToList :: Point -> [Point] -> MyGame Bool
@@ -624,15 +639,16 @@ gotoPoint isFood pt to = do
   st <- get
   let w = water . stState $ st
       u = stUpper st
-      mx = stCrtASt st
+      -- mx = stCrtASt st
       deltat = stDeltat st
       stats = stStatsAs st
       par = distance u pt to
   -- debug $ "gotoPoin: " ++ show pt ++ ", stCrtASt = " ++ show (mx-1)
-  modify $ \s -> s { stCrtASt = mx - 1 }
+  -- modify $ \s -> s { stCrtASt = mx - 1 }
   -- if mx <= 0 || estimateTime stats par > deltat
-  if estimateTime stats par > deltat
-     then return False
+  let et = estimateTime stats par
+  if et > deltat
+     then wanted "gotoPoint" par et deltat
      else do
        let ff = (== to)	-- target hit condition
        putLastAsParam par
@@ -843,6 +859,12 @@ deleteTargets foods = do
 
 putLastAsParam :: Int -> MyGame ()
 putLastAsParam x = modify $ \s -> s { stCParam = x }
+
+wanted :: String -> Int -> Int -> Int -> MyGame Bool
+wanted what ep et deltat = return False
+--    debug $ "Wanted " ++ what ++ " with ep/et = " ++ show ep ++ " / " ++ show et
+--           ++ " but deltat = " ++ show deltat
+--    return False
 
 -- Init bad/busy squares: just a copy of water
 -- plus the food and the current own ants
