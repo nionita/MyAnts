@@ -37,7 +37,6 @@ data MyState = MyState {
          stLibGrad :: LibGrad,			-- which ant can move where
          stHotSpots:: [Point],			-- battle centres
          stOurCnt  :: Int,			-- total count of our ants
-         stCrtASt  :: Int,			-- current astar searches
          stCanStay :: Bool,			-- current ant can wait?
          stValDirs :: [(Dir, Point)],		-- valid directions for current ant
          stStatsFi :: Stats,	-- time statistics for fight
@@ -51,7 +50,6 @@ data Persist = Persist {
          peSeen    :: BitMap,	-- fields where we were
          pePlMemo  :: PlanMemo,	-- our plans
          peEnHills :: [Point],	-- enemy hills (not razed by us)
-         peMaxPASt :: Int,	-- maximum astar searches per turn
          peStatsFi :: Stats,	-- time statistics for fight
          peStatsAs :: Stats	-- time statistics for aStar
      }
@@ -100,8 +98,7 @@ doTurn gp gs = do
                Just pers -> return pers
                Nothing   -> do
                    nseen <- newArray b False
-                   return $ Persist { peSeen = nseen, pePlMemo = M.empty,
-                                      peEnHills = [], peMaxPASt = maxMaxASt `div` 2,
+                   return $ Persist { peSeen = nseen, pePlMemo = M.empty, peEnHills = [],
                                       peStatsFi = newStats 1 25, peStatsAs = newStats 10 25 }
   updateSeen gs (peSeen npers)
   -- these are enemy hills we see this turn
@@ -116,7 +113,7 @@ doTurn gp gs = do
                    stPersist = npers { peEnHills = hi },
                    stUpper = snd b, stOrders = [], stPlans = [],
                    stOurCnt = length (ours gs), stWeakEH = attacs,
-                   stLibGrad = M.empty, stCrtASt = peMaxPASt npers,
+                   stLibGrad = M.empty,
                    stHotSpots = [], stFrFood = food gs, -- `S.difference` tfood
                    stCanStay = True, stValDirs = [], stTimeRem = restTime, stCParam = 0,
                    stStatsFi = peStatsFi npers, stStatsAs = peStatsAs npers, stDeltat = 0
@@ -131,13 +128,11 @@ doTurn gp gs = do
   stf <- execState (freeAnts fas) st1	-- then the free ants
   restTime <- timeRemaining gp gs
   let plans = M.fromList $ stPlans stf
-      astpt = aStarNextTurn (peMaxPASt npers) (stCrtASt stf) restTime
-      fpers = (stPersist stf) { pePlMemo = plans, peMaxPASt = astpt,
+      fpers = (stPersist stf) { pePlMemo = plans,
                                 peStatsFi = stStatsFi stf, peStatsAs = stStatsAs stf }
       orders = stOrders stf
   hPutStrLn stderr $ "Time remaining (ms): " ++ show restTime
                         ++ ", ants: " ++ show (stOurCnt stf)
-                        -- ++ ", A*: rest: " ++ show (stCrtASt stf) ++ ", next: " ++ show astpt
   let gsf = gs { ants = [], ours = [], foodP = [], userState = Just fpers }
       tn  = turnno gs
   when (tn `mod` 100 == 0) $ do
@@ -146,13 +141,6 @@ doTurn gp gs = do
     hPutStrLn stderr "Statistics for AStar:"
     hPutStrLn stderr $ showStats (stStatsAs stf)
   return (orders, gsf)
-
-aStarNextTurn :: Int -> Int -> Int -> Int
-aStarNextTurn prv use tm
-    | tm <= msDecrAst = max 1 (prv `div` 2)	-- minimum 1
-    | tm >= msIncrAst && use < 0
-                      = min maxMaxASt (prv + 1)	-- maximum as per parameter
-    | otherwise       = prv
 
 -- Attacs and defences of enemy hills: how many ants of us and of them are there?
 hillAttacs :: Point -> Int -> Int -> [Point] -> [Point] -> Point -> (Point, (Int, Int))
@@ -297,29 +285,15 @@ perAnt pt = do
            modify $ \s -> s { stCanStay = fst svs, stValDirs = snd svs }
            getGoal pt
 
--- For actions which require A* search check if we have searches
--- If not, return False (to try next action)
--- This should be cheaper than checking other conditions first
-ifAStar :: MyGame Bool -> MyGame Bool
-ifAStar act = act
-{--
-    ast <- gets stCrtASt
-    if ast > 0
-       then act
-       else do
-           when (ast == 0) $ modify $ \s -> s { stCrtASt = -1 }
-           return False
---}
-
 getGoal :: Point -> MyGame Bool
 getGoal pt =
     oneChoice pt <|>	-- if we have only one choice, take it
-    ifAStar (immRaze pt) <|>	-- if we can immediately raze a hill, do it
+    immRaze pt <|>	-- if we can immediately raze a hill, do it
     pickFood pt <|>	-- immediate food pick
     followPlan pt <|>	-- follow a plan
-    ifAStar (razeAttac pt) <|>	-- raze attack
-    ifAStar (smellBlood pt) <|>	-- if there is some battle, go there
-    ifAStar (gotoFood pt) <|>	-- find some food
+    razeAttac pt <|>	-- raze attack
+    smellBlood pt <|>	-- if there is some battle, go there
+    gotoFood pt <|>	-- find some food
     rest pt		-- whatever...
 
 -- When we have only one choice, take it
@@ -370,16 +344,12 @@ easyFood pt maxl = do
              -- take the nearest food in visibility radius
              u  = stUpper st
              gp = stPars st
-             -- mx = stCrtASt st	-- we are limited by aStar searches
              foods = map fst $ takeWhile ((<= viewRadius gp) . snd) $ sortByDist id u pt fo
              deltat = stDeltat st
              stats = stStatsAs st
-         -- debug $ "easyFood: " ++ show pt ++ ", stCrtASt = " ++ show (mx-1)
          if null foods
             then return Nothing
             else do
-               -- modify $ \s -> s { stCrtASt = mx - 1 }
-               -- if mx <= 0 || estimateTime stats (viewRadius gp) > deltat
                let et = estimateTime stats ep
                    ep = viewRadius gp
                if et > deltat
@@ -457,16 +427,12 @@ razeAttac pt = do
 smellBlood :: Point -> MyGame Bool
 smellBlood pt = do
   st <- get
-  let -- mx   = stCrtASt st	-- we are limited by aStar searches
-      hots = stHotSpots st
+  let hots = stHotSpots st
       deltat = stDeltat st
       stats = stStatsAs st
-  -- debug $ "smellBlo: " ++ show pt ++ ", stCrtASt = " ++ show (mx-1)
   if null hots
      then return False
      else do
-        -- modify $ \s -> s { stCrtASt = mx - 1 }
-        -- if mx <= 0 || estimateTime stats maxSmellPath > deltat
         let et = estimateTime stats maxSmellPath
             ep = maxSmellPath
         if et > deltat
@@ -508,10 +474,6 @@ gotoFood pt = do
 
 -- When boring:
 rest pt = do
-    -- ast <- gets stCrtASt
-    -- act <- if ast > 0
-    --           then choose [(7, explore pt), (3, moveRandom pt)]
-    --           else return $ moveRandom pt
     act <- choose [(7, explore pt), (3, moveRandom pt)]
     act
 
@@ -639,13 +601,9 @@ gotoPoint isFood pt to = do
   st <- get
   let w = water . stState $ st
       u = stUpper st
-      -- mx = stCrtASt st
       deltat = stDeltat st
       stats = stStatsAs st
       par = distance u pt to
-  -- debug $ "gotoPoin: " ++ show pt ++ ", stCrtASt = " ++ show (mx-1)
-  -- modify $ \s -> s { stCrtASt = mx - 1 }
-  -- if mx <= 0 || estimateTime stats par > deltat
   let et = estimateTime stats par
   if et > deltat
      then wanted "gotoPoint" par et deltat
