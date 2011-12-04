@@ -21,6 +21,7 @@ import StateT
 import Ants
 import AStar
 import Fight
+import Stats
 
 -- Data structure for internal state
 data MyState = MyState {
@@ -38,14 +39,21 @@ data MyState = MyState {
          stOurCnt  :: Int,			-- total count of our ants
          stCrtASt  :: Int,			-- current astar searches
          stCanStay :: Bool,			-- current ant can wait?
-         stValDirs :: [(Dir, Point)]		-- valid directions for current ant
+         stValDirs :: [(Dir, Point)],		-- valid directions for current ant
+         stStatsFi :: Stats,	-- time statistics for fight
+         stStatsAs :: Stats,	-- time statistics for aStar
+         stCParam  :: Int,	-- last calculation parameter (fight, astar)
+         stTimeRem :: Int,	-- time remaining (last measured)
+         stDeltat  :: Int	-- time for the next action (astar)
      }
 
 data Persist = Persist {
          peSeen    :: BitMap,	-- fields where we were
          pePlMemo  :: PlanMemo,	-- our plans
          peEnHills :: [Point],	-- enemy hills (not razed by us)
-         peMaxPASt :: Int	-- maximum astar searches per turn
+         peMaxPASt :: Int,	-- maximum astar searches per turn
+         peStatsFi :: Stats,	-- time statistics for fight
+         peStatsAs :: Stats	-- time statistics for aStar
      }
 
 type MyGame a = forall r. CPS r MyState IO a
@@ -93,12 +101,14 @@ doTurn gp gs = do
                Nothing   -> do
                    nseen <- newArray b False
                    return $ Persist { peSeen = nseen, pePlMemo = M.empty,
-                                      peEnHills = [], peMaxPASt = maxMaxASt `div` 2 }
+                                      peEnHills = [], peMaxPASt = maxMaxASt `div` 2,
+                                      peStatsFi = newStats 1 20, peStatsAs = newStats 5 10 }
   updateSeen gs (peSeen npers)
   -- these are enemy hills we see this turn
   let hinow = map fst $ filter ((/= 0) . snd) $ hills gs
   -- take only the active ones (actually not razed by us)
   hi <- filterM (liftM not . readArray (peSeen npers)) $ nub $ hinow ++ peEnHills npers
+  restTime <- timeRemaining gp gs
   let attacs = map (hillAttacs (snd b) (razeRadius gp) (homeRadius gp) (ours gs) (map snd $ ants gs)) hi
       tfood = S.fromList $ map plTarget $ M.elems (pePlMemo npers)	-- plan targets
       st0 = MyState {
@@ -108,7 +118,8 @@ doTurn gp gs = do
                    stOurCnt = length (ours gs), stWeakEH = attacs,
                    stLibGrad = M.empty, stCrtASt = peMaxPASt npers,
                    stHotSpots = [], stFrFood = food gs, -- `S.difference` tfood
-                   stCanStay = True, stValDirs = []
+                   stCanStay = True, stValDirs = [], stTimeRem = restTime, stCParam = 0,
+                   stStatsFi = peStatsFi npers, stStatsAs = peStatsAs npers, stDeltat = 0
                }
       zoneRadius2 = hellSteps (attackradius2 gp) 2
       fzs = fightZones (snd b) zoneRadius2 (ours gs) (ants gs) []
@@ -117,16 +128,21 @@ doTurn gp gs = do
   restTime <- timeRemaining gp gs
   hPutStrLn stderr $ "Time remaining (ms) after fight: " ++ show restTime
   let fas = sortFreeAnts st1	-- the ones near important points first
-  stf <- execState (freeAnts restTime fas) st1	-- then the free ants
+  stf <- execState (freeAnts fas) st1	-- then the free ants
   restTime <- timeRemaining gp gs
   let plans = M.fromList $ stPlans stf
       astpt = aStarNextTurn (peMaxPASt npers) (stCrtASt stf) restTime
-      fpers = (stPersist stf) { pePlMemo = plans, peMaxPASt = astpt }
+      fpers = (stPersist stf) { pePlMemo = plans, peMaxPASt = astpt,
+                                peStatsFi = stStatsFi stf, peStatsAs = stStatsAs stf }
       orders = stOrders stf
   hPutStrLn stderr $ "Time remaining (ms): " ++ show restTime
                         ++ ", ants: " ++ show (stOurCnt stf)
                         ++ ", A*: rest: " ++ show (stCrtASt stf) ++ ", next: " ++ show astpt
   let gsf = gs { ants = [], ours = [], foodP = [], userState = Just fpers }
+      tn  = turnno gs
+  when (tn `mod` 25 == 0) $ do
+    hPutStrLn stderr "Statistics for AStar:"
+    hPutStrLn stderr $ showStats (stStatsAs stf)
   return (orders, gsf)
 
 aStarNextTurn :: Int -> Int -> Int -> Int
@@ -151,16 +167,22 @@ cleanDeadPlans gs pe =
 
 -- Orders for the free ants (i.e. not fighting
 -- makeOrders :: [Point] -> MyGame [Order]
-freeAnts :: Int -> [Point] -> MyGame ()
-freeAnts _ [] = return ()
-freeAnts tr0 points = do
+freeAnts :: [Point] -> MyGame ()
+freeAnts [] = return ()
+freeAnts points = do
   st <- get
   let gp = stPars  st
       gs = stState st
   tr <- lift $ timeRemaining gp gs
+  let lt = stTimeRem st
+      lp = stCParam st
+      fis = addParVal (stStatsAs st) lp (lt - tr)
+  when (lp > 0) $ modify $ \s -> s { stStatsAs = fis, stCParam = 0 }
   when (tr >= msReserve) $ do
+      let deltat = lt - tr
+      modify $ \s -> s { stDeltat = deltat }
       perAnt $ head points
-      freeAnts tr $ tail points
+      freeAnts $ tail points
 
 -- Our ants not involved in any fight zone
 myFreeAnts :: [Point] -> [Point] -> [Point]
@@ -339,11 +361,19 @@ easyFood pt maxl = do
              gp = stPars st
              mx = stCrtASt st	-- we are limited by aStar searches
              foods = map fst $ takeWhile ((<= viewRadius gp) . snd) $ sortByDist id u pt fo
-         modify $ \s -> s { stCrtASt = mx - 1 }
+             deltat = stDeltat st
+             stats = stStatsAs st
          -- debug $ "easyFood: " ++ show pt ++ ", stCrtASt = " ++ show (mx-1)
-         if mx <= 0 || null foods
+         if null foods
             then return Nothing
-            else toNearest pt foods maxl
+            else do
+               modify $ \s -> s { stCrtASt = mx - 1 }
+               -- if mx <= 0 || estimateTime stats (viewRadius gp) > deltat
+               if estimateTime stats (viewRadius gp) > deltat
+                  then return Nothing
+                  else do
+                      putLastAsParam (viewRadius gp)
+                      toNearest pt foods maxl
 
 toNearest :: Point -> [Point] -> Int -> MyGame (Maybe (Point, [PathInfo]))
 toNearest pt pts maxl = do
@@ -416,28 +446,35 @@ smellBlood pt = do
   st <- get
   let mx   = stCrtASt st	-- we are limited by aStar searches
       hots = stHotSpots st
-  modify $ \s -> s { stCrtASt = mx - 1 }
+      deltat = stDeltat st
+      stats = stStatsAs st
   -- debug $ "smellBlo: " ++ show pt ++ ", stCrtASt = " ++ show (mx-1)
-  if mx <= 0 || null hots
+  if null hots
      then return False
      else do
-        mth <- toNearest pt hots maxSmellPath
-        case mth of
-            Nothing          -> return False
-            Just (ho, hpath) -> do
-                let hplan = Plan { plPrio = Green, plTarget = ho,
-                                   plPath = plp, plPLen = sum (map piTimes plp),
-                                   plWait = maxPlanWait }
-                    plp = take stepsToBlood hpath
-                    gp  = stPars st
-                    gs  = stState st
-                    u   = stUpper st
-                    cnt = stOurCnt st
-                    nhills = inRadius2 fst (homeRadius gp) u ho $ hills gs
-                -- when the hotspot is near some hill, do not delete it, so more ants are comming
-                when (null nhills && cnt < cntLastAttack) $
-                     modify $ \s -> s { stHotSpots = delete ho hots }
-                executePlan pt hplan
+        modify $ \s -> s { stCrtASt = mx - 1 }
+        -- if mx <= 0 || estimateTime stats maxSmellPath > deltat
+        if estimateTime stats maxSmellPath > deltat
+           then return False
+           else do
+              mth <- toNearest pt hots maxSmellPath
+              putLastAsParam maxSmellPath
+              case mth of
+                  Nothing          -> return False
+                  Just (ho, hpath) -> do
+                      let hplan = Plan { plPrio = Green, plTarget = ho,
+                                         plPath = plp, plPLen = sum (map piTimes plp),
+                                         plWait = maxPlanWait }
+                          plp = take stepsToBlood hpath
+                          gp  = stPars st
+                          gs  = stState st
+                          u   = stUpper st
+                          cnt = stOurCnt st
+                          nhills = inRadius2 fst (homeRadius gp) u ho $ hills gs
+                      -- when the hotspot is near some hill, do not delete it, so more ants are comming
+                      when (null nhills && cnt < cntLastAttack) $
+                           modify $ \s -> s { stHotSpots = delete ho hots }
+                      executePlan pt hplan
 
 -- Go to some free food, in some radius
 gotoFood :: Point -> MyGame Bool
@@ -587,12 +624,17 @@ gotoPoint isFood pt to = do
   let w = water . stState $ st
       u = stUpper st
       mx = stCrtASt st
-  modify $ \s -> s { stCrtASt = mx - 1 }
+      deltat = stDeltat st
+      stats = stStatsAs st
+      par = distance u pt to
   -- debug $ "gotoPoin: " ++ show pt ++ ", stCrtASt = " ++ show (mx-1)
-  if mx <= 0
+  modify $ \s -> s { stCrtASt = mx - 1 }
+  -- if mx <= 0 || estimateTime stats par > deltat
+  if estimateTime stats par > deltat
      then return False
      else do
        let ff = (== to)	-- target hit condition
+       putLastAsParam par
        -- debug $ "Astar from " ++ show pt ++ " to " ++ show to ++ ":"
        mpath <- liftIO $ aStar (natfoDirs w u ff) (distance u to) pt ff Nothing
        case mpath of
@@ -797,6 +839,9 @@ deleteTargets foods = do
         plans  = pePlMemo pers
         plans' = M.filter ((`elem` foods) . plTarget) plans
     put st { stFrFood = food', stPersist = pers { pePlMemo = plans' }}
+
+putLastAsParam :: Int -> MyGame ()
+putLastAsParam x = modify $ \s -> s { stCParam = x }
 
 -- Init bad/busy squares: just a copy of water
 -- plus the food and the current own ants

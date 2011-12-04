@@ -92,6 +92,7 @@ data GameState a = GameState
   , food   :: Food
   , hills  :: [Hill]
   , startTime :: UTCTime
+  , turnno :: Int
   , userState :: Maybe a -- to keep user state
   }
 
@@ -141,8 +142,8 @@ issueOrder order = do
       sdir = show . direction $ order
   putStrLn $ "o " ++ srow ++ " " ++ scol ++ " " ++ sdir
 
-finishTurn :: GameParams -> [Order] -> IO ()
-finishTurn gp ords = do
+finishTurn :: Int -> GameParams -> IO ()
+finishTurn tn gp = do
   putStrLn "go"
   hFlush stdout
   -- let dubs = collisions gp ords
@@ -184,7 +185,8 @@ initialGameState gp = do
   time <- getCurrentTime
   w <- newArray ((0, 0), (rows gp - 1, cols gp - 1)) False
   let gs = GameState { water = w, waterP = [], ants = [], ours = [], food = S.empty,
-                       foodP = [], hills = [], startTime = time, userState = Nothing }
+                       foodP = [], hills = [], startTime = time, turnno = 0,
+                       userState = Nothing }
   return gs
 
 updateGameState :: GameParams -> GameState a -> B.ByteString -> Either B.ByteString (GameState a)
@@ -290,10 +292,10 @@ gameLoop mendt gp gs doTurn = do
           let ws = B.words line
               tn = fst . fromJust $ B.readInt $ head $ tail ws
               run = do
-                  gs1 <- updateGame gp gs
+                  gs1 <- updateGame gp gs { turnno = tn }
                   (orders, gs2) <- doTurn gp gs1
                   mapM_ issueOrder orders
-                  finishTurn gp orders
+                  finishTurn tn gp
                   gameLoop mendt gp gs2 doTurn
           case mendt of
             Just et -> if tn >= et then endGame else run
@@ -318,7 +320,7 @@ game doTurn = do
   let gp = createParams $ map (tuplify2 . B.words) paramInput
   hPutStrLn stderr $ "Params:\n" ++ show gp
   gs <- initialGameState gp
-  finishTurn gp [] -- signal done with setup
+  finishTurn 0 gp -- signal done with setup
   gameLoop endt gp gs doTurn
 
 getEndTurn = do
