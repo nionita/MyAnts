@@ -96,7 +96,8 @@ kamikaRadius = (1*) . attackradius2	-- we try a one to one fight (as we die anyw
 foodIMMax = 1000
 hillIMMax = 1000
 foodIMDec = 20		-- time decay for food in percent (remaining)
-hillIMDec = 90		-- time decay for hills in percent (remaining)
+hillIMDec = 20		-- time decay for hills in percent (remaining)
+spaceIMDec = 90		-- space decay for all in percent (remaining)
 foodWeight = 1
 hillWeight = 1
 
@@ -184,24 +185,29 @@ freeAnts ohs ehs foim = mapM_ (perAnt ohs ehs foim)
 -- simple per ant
 perAnt :: [(Point, InfMap)] -> [(Point, InfMap)] -> InfMap -> Point -> MyGame ()
 perAnt ohs ehs foim pt = do
-    -- debug $ "Point " ++ show pt
+    debug $ "Point " ++ show pt
     (_, dps) <- getValidDirs pt
-    -- debug $ "Valid " ++ show dps
+    debug $ "Valid " ++ show dps
     if null dps
        then return ()	-- perhaps was already moved or cannot move at all
        else do
            let infs = map inf dps
-           -- debug $ "Choose: " ++ show infs
-           d <- choose infs
+               mi   = minimum $ map fst infs
+               prs  = map (sqrm mi) infs
+           debug $ "Infs  : " ++ show infs
+           debug $ "Choose: " ++ show prs
+           d <- choose prs
+           debug $ "Take: " ++ show d
            orderMove pt d "perAnt"
            return ()
     where inf (d, p) = let fo = foodWeight * (foim!p)
                            hi = hillWeight * sum (map ((!p) . snd) ehs)
                            fh = fo + hi
-                           pr = fh * fh
-                       in (pr, d)
+                           -- pr = fh * fh
+                       in (fh, d)
           -- which means: we weight the food and the enemy hills with different factors
           -- and multiply with another factor to get an entry for choose
+          sqrm m (s, d) = let s1 = s - m in (s1*s1, d)
 
 {--
 freeAnts [] = return ()
@@ -946,9 +952,8 @@ difStep rbm im = array bs $ inter ++ left ++ right ++ up ++ down ++ [corld, corl
           x11 = x1 - 1
           y11 = y1 - 1
           y01 = y0 + 1
-          sdecay = 70
           dif x y m = let xy = (x, y)
-                      in if rbm!xy then (xy, 0) else (xy, max (im!xy) (m * sdecay `div` 100))
+                      in if rbm!xy then (xy, 0) else (xy, max (im!xy) (m * spaceIMDec `div` 100))
 
 difNSteps :: Int -> RBitMap -> InfMap -> InfMap
 difNSteps k rbm = head . drop k . iterate (difStep rbm)
