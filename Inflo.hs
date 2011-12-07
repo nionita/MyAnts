@@ -52,9 +52,7 @@ data Persist = Persist {
          peEnHills :: [Point],	-- enemy hills (not razed by us)
          peStatsFi :: Stats,	-- time statistics for fight
          peStatsAs :: Stats,	-- time statistics for aStar
-         peIMFood  :: InfMap,	-- influence map for food
-         peIMOHill :: [(Point, InfMap)],	-- influence maps for our hills
-         peIMEHill :: [(Point, InfMap)]		-- influence maps for enemy hills
+         peIMap    :: InfMap	-- influence map
      }
 
 type MyGame a = forall r. CPS r MyState IO a
@@ -93,13 +91,12 @@ homeRadius   = (1*) . const 100	-- in which we consider to be at home
 razeRadius   =        const 1900	-- in which we consider to raze enemy hills
 dangerRadius = (1*) . attackradius2	-- in which we are in danger
 kamikaRadius = (1*) . attackradius2	-- we try a one to one fight (as we die anyway)
-foodIMMax = 1000
-hillIMMax = 1000
-foodIMDec = 20		-- time decay for food in percent (remaining)
-hillIMDec = 20		-- time decay for hills in percent (remaining)
+foodIMMax = 1000	-- maximum influence for food
+owhiIMMax = 2000	-- maximum influence for own hill in danger
+enhiIMMax = 3000	-- maximum influence for enemy hill
+hotsIMMax =  500	-- maximum influence for hot spots
+timeIMDec = 20		-- time decay for food in percent (remaining)
 spaceIMDec = 90		-- space decay for all in percent (remaining)
-foodWeight = 1
-hillWeight = 1
 
 doTurn :: GameParams -> GameState Persist -> IO ([Order], GameState Persist)
 doTurn gp gs = do
@@ -113,7 +110,7 @@ doTurn gp gs = do
                    nseen <- newArray b False
                    let empIM = listArray b $ repeat 0
                    return $ Persist { peSeen = nseen, pePlMemo = M.empty, peEnHills = [],
-                                      peIMFood = empIM, peIMOHill = [], peIMEHill = [],
+                                      peIMap = empIM,
                                       peStatsFi = newStats 1 25, peStatsAs = newStats 10 25 }
   updateSeen gs (peSeen npers)
   -- these are enemy hills we see this turn
@@ -142,15 +139,17 @@ doTurn gp gs = do
   restTime <- timeRemaining gp gs
   hPutStrLn stderr $ "Time remaining (ms) after fight: " ++ show restTime
   uwater <- unsafeFreeze (water gs)
-  let imOwnHills = updateIMs uwater hio   (peIMOHill npers)
-      imEneHills = updateIMs uwater hinow (peIMEHill npers)
-  imFood <- updateIMFood (timeRemaining gp gs) uwater (peIMFood npers) (foodP gs)
+  let as = map snd $ ants gs
+      dangers = filter (homeDanger gp (snd b) as) hio
+  -- let imOwnHills = updateIMs uwater hio   (peIMOHill npers)
+  --     imEneHills = updateIMs uwater hinow (peIMEHill npers)
+  im <- updateIM (timeRemaining gp gs) uwater (peIMap npers)
+                 (foodP gs) dangers hi (stHotSpots st1)
   let fas = sortFreeAnts st1	-- the ones near important points first
-  stf <- execState (freeAnts imOwnHills imEneHills imFood fas) st1	-- then the free ants
+  stf <- execState (freeAnts im fas) st1	-- then the free ants
   restTime <- timeRemaining gp gs
   let plans = M.fromList $ stPlans stf
-      fpers = (stPersist stf) { pePlMemo = plans, peIMOHill = imOwnHills,
-                                peIMEHill = imEneHills, peIMFood = imFood,
+      fpers = (stPersist stf) { pePlMemo = plans, peIMap = im,
                                 peStatsFi = stStatsFi stf, peStatsAs = stStatsAs stf }
       orders = stOrders stf
   hPutStrLn stderr $ "Time remaining (ms): " ++ show restTime
@@ -170,6 +169,9 @@ hillAttacs bound rr hr os as h = (h, (us, them))
     where us   = length $ inRadius2 id rr bound h os
           them = length $ inRadius2 id hr bound h as
 
+homeDanger :: GameParams -> Point -> [Point] -> Point -> Bool
+homeDanger gp u as pt = not . null $ inRadius2 id (dangerRadius gp) u pt as
+
 {--
 -- Clean plans of our dead ants
 cleanDeadPlans :: GameState Persist -> Persist -> (Persist, [Plan])
@@ -179,12 +181,12 @@ cleanDeadPlans gs pe =
 
 -- Orders for the free ants (i.e. not fighting
 -- makeOrders :: [Point] -> MyGame [Order]
-freeAnts :: [(Point, InfMap)] -> [(Point, InfMap)] -> InfMap -> [Point] -> MyGame ()
-freeAnts ohs ehs foim = mapM_ (perAnt ohs ehs foim)
+freeAnts :: InfMap -> [Point] -> MyGame ()
+freeAnts foim = mapM_ (perAnt foim)
 
 -- simple per ant
-perAnt :: [(Point, InfMap)] -> [(Point, InfMap)] -> InfMap -> Point -> MyGame ()
-perAnt ohs ehs foim pt = do
+perAnt :: InfMap -> Point -> MyGame ()
+perAnt foim pt = do
     debug $ "Point " ++ show pt
     (_, dps) <- getValidDirs pt
     debug $ "Valid " ++ show dps
@@ -200,11 +202,7 @@ perAnt ohs ehs foim pt = do
            debug $ "Take: " ++ show d
            orderMove pt d "perAnt"
            return ()
-    where inf (d, p) = let fo = foodWeight * (foim!p)
-                           hi = hillWeight * sum (map ((!p) . snd) ehs)
-                           fh = fo + hi
-                           -- pr = fh * fh
-                       in (fh, d)
+    where inf (d, p) = (foim!p, d)
           -- which means: we weight the food and the enemy hills with different factors
           -- and multiply with another factor to get an entry for choose
           sqrm m (s, d) = let s1 = s - m in (s1*s1, d)
@@ -229,10 +227,9 @@ freeAnts points = do
   freeAnts $ tail points
 --}
 
-updateIMFood :: IO Int -> RBitMap -> InfMap -> [Point] -> IO InfMap
-updateIMFood trio rbm im fs = go $ amap decay im // zip fs (repeat foodIMMax)
+updateIM :: IO Int -> RBitMap -> InfMap -> [Point] -> [Point] -> [Point] -> [Point] -> IO InfMap
+updateIM trio rbm im fo ow en ho = go $ amap decay im // asc
     where go a = do
-             -- hPutStrLn stderr $ "update food: " ++ show (a!(0,0))
              let a' = difStep rbm a
              if a' == a
                 then return a'
@@ -241,7 +238,12 @@ updateIMFood trio rbm im fs = go $ amap decay im // zip fs (repeat foodIMMax)
                    if tr <= msReserve
                       then return a'
                       else go a'
-          decay x = x * foodIMDec `div` 100
+          decay x = x * timeIMDec `div` 100
+          fas = zip fo (repeat foodIMMax)
+          oas = zip ow (repeat owhiIMMax)
+          eas = zip en (repeat enhiIMMax)
+          has = zip ho (repeat hotsIMMax)
+          asc = fas ++ oas ++ eas ++ has
 
 -- Our ants not involved in any fight zone
 myFreeAnts :: [Point] -> [Point] -> [Point]
@@ -958,6 +960,7 @@ difStep rbm im = array bs $ inter ++ left ++ right ++ up ++ down ++ [corld, corl
 difNSteps :: Int -> RBitMap -> InfMap -> InfMap
 difNSteps k rbm = head . drop k . iterate (difStep rbm)
 
+{--
 updateIMs :: RBitMap -> [Point] -> [(Point, InfMap)] -> [(Point, InfMap)]
 updateIMs rbm hs pims = map updHill pims ++ map addHill (filter mustAdd hs)
     where updHill (p, im) = let im'  = amap decay im	-- forget in time
@@ -967,7 +970,8 @@ updateIMs rbm hs pims = map updHill pims ++ map addHill (filter mustAdd hs)
           addHill h = (h, empIM // [(h, hillIMMax)])
           empIM = listArray (bounds rbm) $ repeat 0
           decay x = x * hillIMDec `div` 100
+--}
 
 debug :: String -> MyGame ()
-debug s = liftIO $ hPutStrLn stderr s
--- debug _ = return ()
+-- debug s = liftIO $ hPutStrLn stderr s
+debug _ = return ()
