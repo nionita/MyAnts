@@ -5,7 +5,7 @@ module Inflo (doTurn) where
 import Control.Monad (filterM, when, forM_, liftM, liftM2, foldM)
 import Data.Ix (index)
 import Data.Functor ((<$>))
-import Data.Array.Base (unsafeRead)
+import Data.Array.Base (unsafeRead, unsafeAt)
 import Data.Array.Unboxed
 import Data.Array.IO
 import Data.List
@@ -88,6 +88,7 @@ stepsToBlood = 15	-- afterwhich we reconsider
 viewRadius   = (1*) . viewradius2	-- visibility radius
 foodRadius   = (1*) . const 100	-- in which we go to food
 homeRadius   = (1*) . const 100	-- in which we consider to be at home
+homeRadius2  = (1*) . const 400	-- in which we consider to be at home
 razeRadius   =        const 1900	-- in which we consider to raze enemy hills
 dangerRadius = (1*) . attackradius2	-- in which we are in danger
 kamikaRadius = (1*) . attackradius2	-- we try a one to one fight (as we die anyway)
@@ -95,6 +96,9 @@ foodIMMax = 1000	-- maximum influence for food
 owhiIMMax = 2000	-- maximum influence for own hill in danger
 enhiIMMax = 3000	-- maximum influence for enemy hill
 hotsIMMax =  500	-- maximum influence for hot spots
+enanIMMax =  200	-- maximum influence for enemy ants
+homeDefProc = 15	-- percent of our ants which should defend
+homeDefRate = 300	-- increase per missing ant for home defend
 timeIMDec = 20		-- time decay for food in percent (remaining)
 spaceIMDec = 90		-- space decay for all in percent (remaining)
 
@@ -140,11 +144,13 @@ doTurn gp gs = do
   hPutStrLn stderr $ "Time remaining (ms) after fight: " ++ show restTime
   uwater <- unsafeFreeze (water gs)
   let as = map snd $ ants gs
-      dangers = filter (homeDanger gp (snd b) as) hio
-  -- let imOwnHills = updateIMs uwater hio   (peIMOHill npers)
-  --     imEneHills = updateIMs uwater hinow (peIMEHill npers)
-  im <- updateIM (timeRemaining gp gs) uwater (peIMap npers)
-                 (foodP gs) dangers hi (stHotSpots st1)
+      (dangers, homes) = partition (homeDanger gp (snd b) as) hio
+      hattrs = map (homeDefenders gp (snd b) (stOurCnt st1) (ours gs)) homes
+      attrs = [(foodP gs, foodIMMax),		-- food
+               (dangers, owhiIMMax),		-- own hills
+               (hi, enhiIMMax),			-- enemy hills
+               (stHotSpots st1, hotsIMMax)]	-- hotspots
+  im <- updateIM (timeRemaining gp gs) uwater (peIMap npers) attrs
   let fas = sortFreeAnts st1	-- the ones near important points first
   stf <- execState (freeAnts im fas) st1	-- then the free ants
   restTime <- timeRemaining gp gs
@@ -171,6 +177,14 @@ hillAttacs bound rr hr os as h = (h, (us, them))
 
 homeDanger :: GameParams -> Point -> [Point] -> Point -> Bool
 homeDanger gp u as pt = not . null $ inRadius2 id (dangerRadius gp) u pt as
+
+homeDefenders :: GameParams -> Point -> Int -> [Point] -> Point -> ([Point], Int)
+homeDefenders gp u cnt os pt = ([pt], v)
+    where n1 = length $ inRadius2 id (homeRadius  gp) u pt os
+          n2 = length $ inRadius2 id (homeRadius2 gp) u pt os
+          n  = n1 + (n2 - n1) `div` 2
+          c  = cnt * homeDefProc `div` 100
+          v  = max 0 $ (c - v) * homeDefRate
 
 -- Orders for the free ants (i.e. not fighting)
 -- freeAnts :: InfMap -> [Point] -> MyGame ()
@@ -219,8 +233,8 @@ freeAnts points = do
   freeAnts $ tail points
 --}
 
-updateIM :: IO Int -> RBitMap -> InfMap -> [Point] -> [Point] -> [Point] -> [Point] -> IO InfMap
-updateIM trio rbm im fo ow en ho = go $ amap decay im // asc
+updateIM :: IO Int -> RBitMap -> InfMap -> [([Point], Int)] -> IO InfMap
+updateIM trio rbm im phs = go $ amap decay im // asc
     where go a = do
              let a' = difStep rbm a
              if a' == a
@@ -231,11 +245,7 @@ updateIM trio rbm im fo ow en ho = go $ amap decay im // asc
                       then return a'
                       else go a'
           decay x = x * timeIMDec `div` 100
-          fas = zip fo (repeat foodIMMax)
-          oas = zip ow (repeat owhiIMMax)
-          eas = zip en (repeat enhiIMMax)
-          has = zip ho (repeat hotsIMMax)
-          asc = fas ++ oas ++ eas ++ has
+          asc = concatMap (\(ps, v) -> zip ps $ repeat v) phs
 
 -- Our ants not involved in any fight zone
 myFreeAnts :: [Point] -> [Point] -> [Point]
@@ -948,21 +958,10 @@ difStep rbm im = array bs $ inter ++ left ++ right ++ up ++ down ++ [corld, corl
           y01 = y0 + 1
           dif x y m = let xy = (x, y)
                       in if rbm!xy then (xy, 0) else (xy, max (im!xy) (m * spaceIMDec `div` 100))
+          a!i = unsafeAt a (index bs i)
 
 difNSteps :: Int -> RBitMap -> InfMap -> InfMap
 difNSteps k rbm = head . drop k . iterate (difStep rbm)
-
-{--
-updateIMs :: RBitMap -> [Point] -> [(Point, InfMap)] -> [(Point, InfMap)]
-updateIMs rbm hs pims = map updHill pims ++ map addHill (filter mustAdd hs)
-    where updHill (p, im) = let im'  = amap decay im	-- forget in time
-                                im'' = if p `elem` hs then im' // [(p, hillIMMax)] else im'
-                            in (p, difStep rbm im'')
-          mustAdd h = maybe True (const False) (lookup h pims)
-          addHill h = (h, empIM // [(h, hillIMMax)])
-          empIM = listArray (bounds rbm) $ repeat 0
-          decay x = x * hillIMDec `div` 100
---}
 
 debug :: String -> MyGame ()
 -- debug s = liftIO $ hPutStrLn stderr s
