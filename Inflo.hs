@@ -172,16 +172,8 @@ hillAttacs bound rr hr os as h = (h, (us, them))
 homeDanger :: GameParams -> Point -> [Point] -> Point -> Bool
 homeDanger gp u as pt = not . null $ inRadius2 id (dangerRadius gp) u pt as
 
-{--
--- Clean plans of our dead ants
-cleanDeadPlans :: GameState Persist -> Persist -> (Persist, [Plan])
-cleanDeadPlans gs pe =
-    where npl = M.intersection (pePlMemo pe) $ M.fromList $ zip (ours gs) $ repeat True
---}
-
--- Orders for the free ants (i.e. not fighting
--- makeOrders :: [Point] -> MyGame [Order]
-freeAnts :: InfMap -> [Point] -> MyGame ()
+-- Orders for the free ants (i.e. not fighting)
+-- freeAnts :: InfMap -> [Point] -> MyGame ()
 freeAnts foim = mapM_ (perAnt foim)
 
 -- simple per ant

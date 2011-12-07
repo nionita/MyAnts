@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternGuards #-}
+
 module Stats (
     Stats,
     newStats, addParVal, estimateTime,

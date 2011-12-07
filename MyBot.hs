@@ -5,7 +5,7 @@ import Data.Maybe (mapMaybe)
 import System.IO
 
 import Ants
-import Brain (doTurn)
+import Inflo (doTurn)
 
 -- | This runs the game
 main :: IO ()
