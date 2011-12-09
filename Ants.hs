@@ -84,15 +84,15 @@ data Order = Order
   } deriving (Show)
 
 data GameState a = GameState
-  { water  :: BitMap
+  { water  :: !BitMap
   , waterP :: [Point]
   , ours   :: [Point]   -- our ants
   , ants   :: [(Int, Point)]   -- other ants
   , foodP  :: [Point]
-  , food   :: Food
+  , food   :: !Food
   , hills  :: [Hill]
   , startTime :: UTCTime
-  , turnno :: Int
+  , turnno :: !Int
   , userState :: Maybe a -- to keep user state
   }
 
@@ -232,9 +232,9 @@ prepState gs = do
 
 -- timeRemaining :: GameParams -> GameState -> IO NominalDiffTime
 timeRemaining :: GameParams -> GameState a -> IO Int
-timeRemaining gp gs = do
+timeRemaining gp !gs = do
   timeNow <- getCurrentTime
-  let ms = turntime gp - round (1000 * (timeNow `diffUTCTime` startTime gs))
+  let !ms = turntime gp - round (1000 * (timeNow `diffUTCTime` startTime gs))
   return ms
 
 gatherParamInput :: IO [B.ByteString]

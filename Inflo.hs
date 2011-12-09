@@ -1,9 +1,10 @@
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE BangPatterns #-}
 
 module Inflo (doTurn) where
 
 import Control.Monad (filterM, when, forM_, liftM, liftM2, foldM)
-import Data.Ix (index)
+import GHC.Arr (unsafeIndex)
 import Data.Functor ((<$>))
 import Data.Array.Base (unsafeRead, unsafeAt)
 import Data.Array.Unboxed
@@ -25,34 +26,34 @@ import Stats
 
 -- Data structure for internal state
 data MyState = MyState {
-         stPars    :: GameParams,		-- game params
+         stPars    :: !GameParams,		-- game params
          stState   :: GameState Persist,	-- game state (extern)
-         stPersist :: Persist,			-- persistent internal state
-         stBusy    :: BitMap,			-- busy fields
-         stUpper   :: Point,			-- upper bound of the world
+         stPersist :: !Persist,			-- persistent internal state
+         stBusy    :: !BitMap,			-- busy fields
+         stUpper   :: !Point,			-- upper bound of the world
          stOrders  :: [Order],			-- accumulates orders
          stPlans   :: [(Point, Plan)],		-- accumulates plans
          stWeakEH  :: [(Point, (Int, Int))],	-- weakness of enemy hills
-         stFrFood  :: Food,			-- still untargeted food
-         stLibGrad :: LibGrad,			-- which ant can move where
+         stFrFood  :: !Food,			-- still untargeted food
+         stLibGrad :: !LibGrad,			-- which ant can move where
          stHotSpots:: [Point],			-- battle centres
-         stOurCnt  :: Int,			-- total count of our ants
-         stCanStay :: Bool,			-- current ant can wait?
+         stOurCnt  :: !Int,			-- total count of our ants
+         stCanStay :: !Bool,			-- current ant can wait?
          stValDirs :: [(Dir, Point)],		-- valid directions for current ant
-         stStatsFi :: Stats,	-- time statistics for fight
-         stStatsAs :: Stats,	-- time statistics for aStar
-         stCParam  :: Int,	-- last calculation parameter (fight, astar)
-         stTimeRem :: Int,	-- time remaining (last measured)
-         stDeltat  :: Int	-- time for the next action (astar)
+         stStatsFi :: !Stats,	-- time statistics for fight
+         stStatsAs :: !Stats,	-- time statistics for aStar
+         stCParam  :: !Int,	-- last calculation parameter (fight, astar)
+         -- stTimeRem :: !Int,	-- time remaining (last measured)
+         stDeltat  :: !Int	-- time for the next action (astar)
      }
 
 data Persist = Persist {
-         peSeen    :: BitMap,	-- fields where we were
-         pePlMemo  :: PlanMemo,	-- our plans
+         peSeen    :: !BitMap,	-- fields where we were
+         pePlMemo  :: !PlanMemo,	-- our plans
          peEnHills :: [Point],	-- enemy hills (not razed by us)
-         peStatsFi :: Stats,	-- time statistics for fight
-         peStatsAs :: Stats,	-- time statistics for aStar
-         peIMap    :: InfMap	-- influence map
+         peStatsFi :: !Stats,	-- time statistics for fight
+         peStatsAs :: !Stats,	-- time statistics for aStar
+         peIMap    :: !InfMap	-- influence map
      }
 
 type MyGame a = forall r. CPS r MyState IO a
@@ -123,17 +124,19 @@ doTurn gp gs = do
       hinow = map fst hinow'
   -- take only the active ones (actually not razed by us)
   hi <- filterM (liftM not . readArray (peSeen npers)) $ nub $ hinow ++ peEnHills npers
-  restTime <- timeRemaining gp gs
+  -- restTime0 <- timeRemaining gp gs
   let attacs = map (hillAttacs (snd b) (razeRadius gp) (homeRadius gp) (ours gs) (map snd $ ants gs)) hi
       tfood = S.fromList $ map plTarget $ M.elems (pePlMemo npers)	-- plan targets
-      st0 = MyState {
+      !st0 = MyState {
                    stPars = gp, stState = gs, stBusy = busy,
                    stPersist = npers { peEnHills = hi },
                    stUpper = snd b, stOrders = [], stPlans = [],
                    stOurCnt = length (ours gs), stWeakEH = attacs,
                    stLibGrad = M.empty,
-                   stHotSpots = [], stFrFood = food gs, -- `S.difference` tfood
-                   stCanStay = True, stValDirs = [], stTimeRem = restTime, stCParam = 0,
+                   -- stHotSpots = [], stFrFood = food gs, -- `S.difference` tfood
+                   stHotSpots = [], stFrFood = S.empty, -- `S.difference` tfood
+                   -- stCanStay = True, stValDirs = [], stTimeRem = restTime, stCParam = 0,
+                   stCanStay = True, stValDirs = [], stCParam = 0,
                    stStatsFi = peStatsFi npers, stStatsAs = peStatsAs npers, stDeltat = 0
                }
       zoneRadius2 = hellSteps (attackradius2 gp) 2
@@ -155,7 +158,7 @@ doTurn gp gs = do
   stf <- execState (freeAnts im fas) st1	-- then the free ants
   restTime <- timeRemaining gp gs
   let plans = M.fromList $ stPlans stf
-      fpers = (stPersist stf) { pePlMemo = plans, peIMap = im,
+      !fpers = (stPersist stf) { pePlMemo = plans, peIMap = im,
                                 peStatsFi = stStatsFi stf, peStatsAs = stStatsAs stf }
       orders = stOrders stf
   hPutStrLn stderr $ "Time remaining (ms): " ++ show restTime
@@ -236,7 +239,7 @@ freeAnts points = do
 updateIM :: IO Int -> RBitMap -> InfMap -> [([Point], Int)] -> IO InfMap
 updateIM trio rbm im phs = go $ amap decay im // asc
     where go a = do
-             let a' = difStep rbm a
+             let a' = a `seq` difStep rbm a
              if a' == a
                 then return a'
                 else do
@@ -261,26 +264,29 @@ fightAnts fs
     | otherwise = do
         st <- get
         let gp = stPars st
+            gs = stState st
             u  = stUpper st
             r1 = hellSteps (attackradius2 gp) 1
             r0  = attackradius2 gp
         -- mapM_ (perFightZone r0 r1) fs'
-        go r0 r1 fs'
+        tr <- lift $ timeRemaining gp gs
+        go r0 r1 tr fs'
     where fs' = filter (\(ps, tm) -> length ps + points tm <= zoneMax) fs
-          go _ _ [] = return ()
-          go a b (fz@(ps, tm):fzs) = do
+          go _ _ _   [] = return ()
+          go a b tr0 (fz@(ps, tm):fzs) = do
              st <- get
-             let gp = stPars st
-                 gs = stState st
-             tr <- lift $ timeRemaining gp gs
-             let lt = stTimeRem st
+             let deltat = tr0 - msReserve
                  lp = length ps + points tm
-                 fis = addParVal (stStatsFi st) lp (lt - tr)
-             modify $ \s -> s { stTimeRem = tr }
-             when (lp > 0) $ modify $ \s -> s { stStatsFi = fis }
-             let deltat = tr - msReserve
-             when (deltat > 0) $ perFightZone a b fz
-             go a b fzs
+                 sf = stStatsFi st
+                 tn = estimateTime sf lp
+             when (deltat >= tn) $ do
+                 perFightZone a b fz
+                 let gp = stPars st
+                     gs = stState st
+                 tr <- lift $ timeRemaining gp gs
+                 let fis = addParVal sf lp (tr0 - tr)
+                 modify $ \s -> s { stStatsFi = fis }
+                 go a b tr fzs
 
 perFightZone r0 r1 fz@(us, themm) = do
     ho <- makeHotSpot fz
@@ -932,8 +938,8 @@ filterBusy f as = do
     lift $ filterM (\a -> liftM not $ readArray busy (f a)) as
 
 bitMap, notBitMap :: BitMap -> Point -> [(a, Point)] -> IO [(a, Point)]
-bitMap    w u = filterM (            unsafeRead w . index ((0, 0), u) . snd)
-notBitMap w u = filterM (liftM not . unsafeRead w . index ((0, 0), u) . snd)
+bitMap    w u = filterM (            unsafeRead w . unsafeIndex ((0, 0), u) . snd)
+notBitMap w u = filterM (liftM not . unsafeRead w . unsafeIndex ((0, 0), u) . snd)
 
 difStep :: RBitMap -> InfMap -> InfMap
 difStep rbm im = array bs $ inter ++ left ++ right ++ up ++ down ++ [corld, corlu, corrd, corru]
@@ -958,7 +964,7 @@ difStep rbm im = array bs $ inter ++ left ++ right ++ up ++ down ++ [corld, corl
           y01 = y0 + 1
           dif x y m = let xy = (x, y)
                       in if rbm!xy then (xy, 0) else (xy, max (im!xy) (m * spaceIMDec `div` 100))
-          a!i = unsafeAt a (index bs i)
+          a!i = unsafeAt a (unsafeIndex bs i)
 
 difNSteps :: Int -> RBitMap -> InfMap -> InfMap
 difNSteps k rbm = head . drop k . iterate (difStep rbm)
