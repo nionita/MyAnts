@@ -30,7 +30,8 @@ data EvalPars = EvalPars {
                     opt :: Float,	-- weight of the best case (100-pes-opt=weight of avg)
                     reg :: Int,		-- weight of enemy ants (100-reg=weight of ours)
                     agr :: Bool,	-- agressiv moves preferred
-                    tgt :: Maybe Point	-- target: we will move to this point
+                    tgt :: Maybe Point,	-- target: we will move to this point
+                    tgs :: (Int, Int)	-- scores for target point (us, them), unit ants
                 } deriving Show
 
 -- This function calculates the best final configurations (and the moves
@@ -115,20 +116,29 @@ freeMove pm = filter (\(_, p) -> M.lookup p pm == Nothing)
 -- For now we just make the difference: enemy loss - our loss
 -- Bigger is better
 evalOutcome :: DstFun -> EvalPars -> PoiMap -> Int
-evalOutcome near epar final = our * (w - 100) + (the - our) * w
-    where lom = getLosses near final
+evalOutcome near epar final = tgp * 100 + our * (w - 100) + (the - our) * w
+    where (lom, dds) = getLosses near final
           all = M.fold (+) 0 lom
           our = maybe 0 id $ M.lookup 0 lom
           the = all - our
           w   = reg epar
+          tgp = maybe 0 target (tgt epar)
+          (w1, w2) = tgs epar
+          target p = let alive = M.difference final dds
+                     in case M.lookup p alive of
+                         Nothing -> 0
+                         Just pl -> if pl == 0 then w1 else w2
 
 -- We return the dead ants per (involved) player (a map)
+-- and a map of dead ants (value: player)
 -- Than we can weight the looses with some factors (in the caller)
 -- for example to kill more from some player, or (if we have enough ants)
 -- to accept even negative ballance, in order to eliminate a player or
 -- raze a hill
-getLosses :: DstFun -> PoiMap -> M.Map Int Int
-getLosses near final = foldl' accDeads M.empty $ map fst deads
+-- also we can see if a hill was razed during the fight, by comparing
+-- the alive ants with the hill position (this is done in caller)
+getLosses :: DstFun -> PoiMap -> (M.Map Int Int, PoiMap)
+getLosses near final = foldl' accDeads (M.empty, M.empty) $ map fst deads
     where pairs = M.assocs final
           eneml = map (nearEnemies near pairs) pairs
           enemm = M.fromList eneml
@@ -136,9 +146,9 @@ getLosses near final = foldl' accDeads M.empty $ map fst deads
           df (_, (ecnt, es)) = any (deadly ecnt) es
           -- enemy is at least as strong (i.e. has smaller or equal count!):
           deadly cnt e = maybe False ((<= cnt) . fst) (M.lookup e enemm)
-          accDeads m p = case M.lookup p final of	-- count the deads per player
-                             Nothing -> m
-                             Just pl -> M.insertWith (+) pl 1 m
+          accDeads (m, d) p = maybe (m, d)
+                                    (\pl -> (M.insertWith (+) pl 1 m, M.insert p pl d))
+                                    (M.lookup p final)
 
 -- For an ant, find the enemies in fight distance
 nearEnemies :: DstFun -> [(Point, Int)] -> (Point, Int) -> (Point, (Int, [Point]))

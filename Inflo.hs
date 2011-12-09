@@ -94,10 +94,10 @@ razeRadius   =        const 1900	-- in which we consider to raze enemy hills
 dangerRadius = (1*) . attackradius2	-- in which we are in danger
 kamikaRadius = (1*) . attackradius2	-- we try a one to one fight (as we die anyway)
 foodIMMax = 1000	-- maximum influence for food
-owhiIMMax = 2000	-- maximum influence for own hill in danger
+owhiIMMax =  900	-- maximum influence for own hill in danger
 enhiIMMax = 3000	-- maximum influence for enemy hill
 hotsIMMax =  500	-- maximum influence for hot spots
-enanIMMax =  200	-- maximum influence for enemy ants
+enanIMMax =  800	-- maximum influence for enemy ants in home zone
 homeDefProc = 15	-- percent of our ants which should defend
 homeDefRate = 300	-- increase per missing ant for home defend
 timeIMDec = 20		-- time decay for food in percent (remaining)
@@ -149,8 +149,10 @@ doTurn gp gs = do
   let as = map snd $ ants gs
       (dangers, homes) = partition (homeDanger gp (snd b) as) hio
       hattrs = map (homeDefenders gp (snd b) (stOurCnt st1) (ours gs)) homes
+      enants = concat [ inRadius2 id (homeRadius2 gp) (snd b) h as | h <- dangers ]
       attrs = [(foodP gs, foodIMMax),		-- food
                (dangers, owhiIMMax),		-- own hills
+               (enants, enanIMMax),		-- enemy ants near our home
                (hi, enhiIMMax),			-- enemy hills
                (stHotSpots st1, hotsIMMax)]	-- hotspots
   im <- updateIM (timeRemaining gp gs) uwater (peIMap npers) attrs
@@ -179,7 +181,7 @@ hillAttacs bound rr hr os as h = (h, (us, them))
           them = length $ inRadius2 id hr bound h as
 
 homeDanger :: GameParams -> Point -> [Point] -> Point -> Bool
-homeDanger gp u as pt = not . null $ inRadius2 id (dangerRadius gp) u pt as
+homeDanger gp u as pt = not . null $ inRadius2 id (homeRadius2 gp) u pt as
 
 homeDefenders :: GameParams -> Point -> Int -> [Point] -> Point -> ([Point], Int)
 homeDefenders gp u cnt os pt = ([pt], v)
@@ -309,19 +311,23 @@ perFightZone r0 r1 fz@(us, themm) = do
 points tm = sum $ map length $ M.elems tm
 
 fightParams st fz@(us, themm) = EvalPars { pes = pes', opt = 0, reg = reg',
-                                           agr = agr', tgt = Nothing }
+                                           agr = agr', tgt = tgt', tgs = tgs' }
     where u   = stUpper st
           gp  = stPars st
           gs  = stState st
           c   = stOurCnt st
           ho  = hotSpot fz
           nhills = inRadius2 fst (homeRadius gp) u ho $ hills gs
+          (ohills, ehills) = partition ((==0) . snd) nhills
           usl  = length us
           thl  = points themm
           maj  = usl - thl
           reg' = min 100 $ c * c `div` 200	-- by 0 is 0, by 100 is 50, maximum is 100
           agr' = maj >= 1
           pes' = if null nhills then 70 else 20
+          (tgt', tgs') | null ohills && null ehills = (Nothing, (0, 0))
+                       | null ohills = (Just $ fst $ head ehills, (100, 0))
+                       | otherwise   = (Just $ fst $ head ohills, (0, -100))
 
 extOrderMove :: (Point, EDir) -> MyGame ()
 extOrderMove (pt, edir) = do
