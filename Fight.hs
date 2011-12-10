@@ -137,6 +137,7 @@ evalOutcome near epar final = tgp * 100 + our * (w - 100) + (the - our) * w
 -- raze a hill
 -- also we can see if a hill was razed during the fight, by comparing
 -- the alive ants with the hill position (this is done in caller)
+{--
 getLosses :: DstFun -> PoiMap -> PoiMap
 getLosses near final = foldl' accDeads M.empty $ map fst $ filter df eneml
     where -- pairs = M.assocs final
@@ -146,6 +147,9 @@ getLosses near final = foldl' accDeads M.empty $ map fst $ filter df eneml
           -- enemy is at least as strong (i.e. has smaller or equal count!):
           deadly cnt e = maybe False ((<= cnt) . fst) (lookup e eneml)
           accDeads d p = maybe d (\pl -> M.insert p pl d) (M.lookup p final)
+--}
+getLosses :: DstFun -> PoiMap -> PoiMap
+getLosses near final = deads near $ combats near $ M.assocs final
 
 -- For an ant, find the enemies in fight distance
 nearEnemies :: DstFun -> [(Point, Int)] -> (Point, Int) -> (Point, (Int, [Point]))
@@ -153,16 +157,44 @@ nearEnemies near pis pi = (fst pi, (length en, en))
     where f (a1, p1) (a2, p2) = (a2, p1 /= p2 && near a1 a2)
           en = map fst . filter snd . zipWith f (repeat pi) $ pis
 
+{--
 combats :: DstFun -> [(Point, Int)] -> [(Point, (Int, [Point]))]
 combats near = map simpl . groupBy ((==) `on` fst) . sort . go []
     where go acc []       = acc
-          go acc (pi:pis) = go (rez [] pi pis ++ acc) pis
-          rez acc _ [] = acc
-          rez acc pi@(p, i) ((q, j):pis)
-              | i == j    = rez acc pi pis
-              | near p q  = rez ((p, q) : (q, p) : acc) pi pis
-              | otherwise = rez acc pi pis
+          go acc (pi@(p, i):pis) = go rez pis
+              where rez = foldr bat acc pis
+                    bat (q, j) acc
+                        | i == j    = acc
+                        | near p q  = (p, q) : (q, p) : acc
+                        | otherwise = acc
           simpl li@((p, _):_) = (p, (length li, map snd li))
+--}
+
+combats :: DstFun -> [(Point, Int)] -> [((Point, Int), Int)]
+combats near = map simpl . group . sort . go []
+    where go acc []       = acc
+          go acc (pi@(p, i):pis) = go rez pis
+              where rez = foldr bat acc pis
+                    bat qj@(q, j) acc
+                        | i == j    = acc
+                        | near p q  = pi : qj : acc
+                        | otherwise = acc
+          simpl li@(pi:_) = (pi, length li)
+
+deads :: DstFun -> [((Point, Int), Int)] -> PoiMap
+deads near = go M.empty
+    where go acc []    = acc
+          go acc (pi@((p, _), _):pis)
+              | M.member p acc = go acc pis
+              | otherwise      = check acc pi pis
+          check acc _              []            = acc
+          check acc pi@((p, i), m) (qj@((q, j), n):pis)
+              | i == j    = check acc pi pis
+              | near p q  = case compare m n of
+                               LT -> check (M.insert q j acc) pi pis
+                               EQ -> M.insert q j $ M.insert p i acc
+                               GT -> M.insert p i acc
+              | otherwise = check acc pi pis
 
 type PlPoint = (Int, Point)
 type PPSet = S.Set PlPoint
