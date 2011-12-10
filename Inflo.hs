@@ -94,12 +94,11 @@ razeRadius   =        const 1900	-- in which we consider to raze enemy hills
 dangerRadius = (1*) . attackradius2	-- in which we are in danger
 kamikaRadius = (1*) . attackradius2	-- we try a one to one fight (as we die anyway)
 foodIMMax = 1000	-- maximum influence for food
-owhiIMMax =  900	-- maximum influence for own hill in danger
 enhiIMMax = 3000	-- maximum influence for enemy hill
 hotsIMMax =  500	-- maximum influence for hot spots
 enanIMMax =  800	-- maximum influence for enemy ants in home zone
-homeDefProc = 15	-- percent of our ants which should defend
-homeDefRate = 300	-- increase per missing ant for home defend
+homeDefProc = 10	-- percent of our ants which should defend
+homeDefRate = 100	-- increase per missing ant for home defend
 timeIMDec = 20		-- time decay for food in percent (remaining)
 spaceIMDec = 90		-- space decay for all in percent (remaining)
 
@@ -147,15 +146,14 @@ doTurn gp gs = do
   hPutStrLn stderr $ "Time remaining (ms) after fight: " ++ show restTime
   uwater <- unsafeFreeze (water gs)
   let as = map snd $ ants gs
-      (dangers, homes) = partition (homeDanger gp (snd b) as) hio
-      hattrs = map (homeDefenders gp (snd b) (stOurCnt st1) (ours gs)) homes
-      enants = concat [ inRadius2 id (homeRadius2 gp) (snd b) h as | h <- dangers ]
+      -- collect all our homes with deficit in defence and the attacking enemy ants
+      (hattrs, enants) = foldl collect ([], [])
+                             $ map (homeDefenders gp (snd b) (stOurCnt st1) (ours gs) as) hio
       attrs = [(foodP gs, foodIMMax),		-- food
-               (dangers, owhiIMMax),		-- own hills
                (enants, enanIMMax),		-- enemy ants near our home
                (hi, enhiIMMax),			-- enemy hills
                (stHotSpots st1, hotsIMMax)]	-- hotspots
-  im <- updateIM (timeRemaining gp gs) uwater (peIMap npers) attrs
+  im <- updateIM (timeRemaining gp gs) uwater (peIMap npers) $ attrs ++ hattrs
   let fas = sortFreeAnts st1	-- the ones near important points first
   stf <- execState (freeAnts im fas) st1	-- then the free ants
   restTime <- timeRemaining gp gs
@@ -180,16 +178,24 @@ hillAttacs bound rr hr os as h = (h, (us, them))
     where us   = length $ inRadius2 id rr bound h os
           them = length $ inRadius2 id hr bound h as
 
-homeDanger :: GameParams -> Point -> [Point] -> Point -> Bool
-homeDanger gp u as pt = not . null $ inRadius2 id (homeRadius2 gp) u pt as
+-- This is just a help function to collect the attacked own hills and the attacking
+-- enemy ants in a form acceptable for updateIM
+collect :: ([([Point], Int)], [Point]) -> (Point, Int, [Point]) -> ([([Point], Int)], [Point])
+collect (hs, as) (h, v, as') = (([h], v):hs, as' ++ as)
 
-homeDefenders :: GameParams -> Point -> Int -> [Point] -> Point -> ([Point], Int)
-homeDefenders gp u cnt os pt = ([pt], v)
-    where n1 = length $ inRadius2 id (homeRadius  gp) u pt os
-          n2 = length $ inRadius2 id (homeRadius2 gp) u pt os
-          n  = n1 + (n2 - n1) `div` 2
+-- We consider a home in danger when the number of defenders is less
+-- then the number of attackers + some margin
+-- For such homes we set an attract value proportional to the deficit
+-- Also the attacking enemy ants get some attractor value
+homeDefenders :: GameParams -> Point -> Int -> [Point] -> [Point] -> Point -> (Point, Int, [Point])
+homeDefenders gp u cnt os as pt = (pt, v, aa)
+    where d1 = length $ inRadius2 id (homeRadius  gp) u pt os
+          d2 = length $ inRadius2 id (homeRadius2 gp) u pt os
+          d  = d1 + (d2 - d1) `div` 2
+          aa = inRadius2 id (homeRadius2 gp) u pt as
+          a  = length aa
           c  = cnt * homeDefProc `div` 100
-          v  = max 0 $ (c - v) * homeDefRate
+          v  = max 0 $ (c + a - d) * homeDefRate
 
 -- Orders for the free ants (i.e. not fighting)
 -- freeAnts :: InfMap -> [Point] -> MyGame ()
@@ -198,19 +204,19 @@ freeAnts foim = mapM_ (perAnt foim)
 -- simple per ant
 perAnt :: InfMap -> Point -> MyGame ()
 perAnt foim pt = do
-    debug $ "Point " ++ show pt
+    -- debug $ "Point " ++ show pt
     (_, dps) <- getValidDirs pt
-    debug $ "Valid " ++ show dps
+    -- debug $ "Valid " ++ show dps
     if null dps
        then return ()	-- perhaps was already moved or cannot move at all
        else do
            let infs = map inf dps
                mi   = minimum $ map fst infs
                prs  = map (sqrm mi) infs
-           debug $ "Infs  : " ++ show infs
-           debug $ "Choose: " ++ show prs
+           -- debug $ "Infs  : " ++ show infs
+           -- debug $ "Choose: " ++ show prs
            d <- choose prs
-           debug $ "Take: " ++ show d
+           -- debug $ "Take: " ++ show d
            orderMove pt d "perAnt"
            return ()
     where inf (d, p) = (foim!p, d)
@@ -270,7 +276,6 @@ fightAnts fs
             u  = stUpper st
             r1 = hellSteps (attackradius2 gp) 1
             r0  = attackradius2 gp
-        -- mapM_ (perFightZone r0 r1) fs'
         tr <- lift $ timeRemaining gp gs
         go r0 r1 tr fs'
     where fs' = filter (\(ps, tm) -> length ps + points tm <= zoneMax) fs
@@ -281,12 +286,14 @@ fightAnts fs
                  lp = length ps + points tm
                  sf = stStatsFi st
                  tn = estimateTime sf lp
+             debug $ "Remaining: " ++ show tr0 ++ ", estimate time: " ++ show tn
              when (deltat >= tn) $ do
                  perFightZone a b fz
                  let gp = stPars st
                      gs = stState st
                  tr <- lift $ timeRemaining gp gs
                  let fis = addParVal sf lp (tr0 - tr)
+                 debug $ "Actually: " ++ show (tr0 - tr)
                  modify $ \s -> s { stStatsFi = fis }
                  go a b tr fzs
 
@@ -302,8 +309,8 @@ perFightZone r0 r1 fz@(us, themm) = do
         epar = fightParams st fz
         (sco, cfs) = nextTurn u r0 r1 (valDirs ibusy u) epar us themm
         oac = fst cfs
-    -- debug $ "Fight zone: us = " ++ show us ++ ", them = " ++ show themm
-    -- debug $ "Params: " ++ show epar ++ " score = " ++ show sco ++ "\nOur moves: " ++ show oac
+    debug $ "Fight zone: us = " ++ show us ++ ", them = " ++ show themm
+    debug $ "Params: " ++ show epar ++ " score = " ++ show sco ++ "\nOur moves: " ++ show oac
     mapM_ extOrderMove oac
     where valDirs :: UArray Point Bool -> Point -> Point -> [(Dir, Point)]
           valDirs w u pt = filter (not . (w!) . snd) $ map (\d -> (d, move u pt d)) allDirs
@@ -976,5 +983,5 @@ difNSteps :: Int -> RBitMap -> InfMap -> InfMap
 difNSteps k rbm = head . drop k . iterate (difStep rbm)
 
 debug :: String -> MyGame ()
--- debug s = liftIO $ hPutStrLn stderr s
-debug _ = return ()
+debug s = liftIO $ hPutStrLn stderr s
+-- debug _ = return ()
