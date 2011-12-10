@@ -13,6 +13,7 @@ import Data.List
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Ord (comparing)
+import Data.Function (on)
 
 import Ants
 
@@ -117,13 +118,12 @@ freeMove pm = filter (\(_, p) -> M.lookup p pm == Nothing)
 -- Bigger is better
 evalOutcome :: DstFun -> EvalPars -> PoiMap -> Int
 evalOutcome near epar final = tgp * 100 + our * (w - 100) + (the - our) * w
-    where (lom, dds) = getLosses near final
-          all = M.fold (+) 0 lom
-          our = maybe 0 id $ M.lookup 0 lom
-          the = all - our
+    where dds = getLosses near final
+          (our, the) = M.fold count (0, 0) dds
           w   = reg epar
           tgp = maybe 0 target (tgt epar)
           (w1, w2) = tgs epar
+          count p (a, b) = if p == 0 then (a+1, b) else (a, b+1)
           target p = let alive = M.difference final dds
                      in case M.lookup p alive of
                          Nothing -> 0
@@ -137,24 +137,32 @@ evalOutcome near epar final = tgp * 100 + our * (w - 100) + (the - our) * w
 -- raze a hill
 -- also we can see if a hill was razed during the fight, by comparing
 -- the alive ants with the hill position (this is done in caller)
-getLosses :: DstFun -> PoiMap -> (M.Map Int Int, PoiMap)
-getLosses near final = foldl' accDeads (M.empty, M.empty) $ map fst deads
-    where pairs = M.assocs final
-          eneml = map (nearEnemies near pairs) pairs
-          enemm = M.fromList eneml
-          deads = filter df eneml
+getLosses :: DstFun -> PoiMap -> PoiMap
+getLosses near final = foldl' accDeads M.empty $ map fst $ filter df eneml
+    where -- pairs = M.assocs final
+          -- eneml = map (nearEnemies near pairs) pairs
+          eneml = combats near $ M.assocs final
           df (_, (ecnt, es)) = any (deadly ecnt) es
           -- enemy is at least as strong (i.e. has smaller or equal count!):
-          deadly cnt e = maybe False ((<= cnt) . fst) (M.lookup e enemm)
-          accDeads (m, d) p = maybe (m, d)
-                                    (\pl -> (M.insertWith (+) pl 1 m, M.insert p pl d))
-                                    (M.lookup p final)
+          deadly cnt e = maybe False ((<= cnt) . fst) (lookup e eneml)
+          accDeads d p = maybe d (\pl -> M.insert p pl d) (M.lookup p final)
 
 -- For an ant, find the enemies in fight distance
 nearEnemies :: DstFun -> [(Point, Int)] -> (Point, Int) -> (Point, (Int, [Point]))
 nearEnemies near pis pi = (fst pi, (length en, en))
     where f (a1, p1) (a2, p2) = (a2, p1 /= p2 && near a1 a2)
           en = map fst . filter snd . zipWith f (repeat pi) $ pis
+
+combats :: DstFun -> [(Point, Int)] -> [(Point, (Int, [Point]))]
+combats near = map simpl . groupBy ((==) `on` fst) . sort . go []
+    where go acc []       = acc
+          go acc (pi:pis) = go (rez [] pi pis ++ acc) pis
+          rez acc _ [] = acc
+          rez acc pi@(p, i) ((q, j):pis)
+              | i == j    = rez acc pi pis
+              | near p q  = rez ((p, q) : (q, p) : acc) pi pis
+              | otherwise = rez acc pi pis
+          simpl li@((p, _):_) = (p, (length li, map snd li))
 
 type PlPoint = (Int, Point)
 type PPSet = S.Set PlPoint

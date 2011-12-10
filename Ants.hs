@@ -109,7 +109,8 @@ data GameParams = GameParams
   } deriving (Show)
 
 modDistance :: Int -> Int -> Int -> Int
-modDistance n x y = min ((x - y) `mod` n) ((y - x) `mod` n)
+modDistance n x y = if x >= y then min (x-y) (n-x+y) else min (y-x) (n-y+x)
+{-# INLINE modDistance #-}
 
 euclidSquare :: Point  -- bound
              -> Point -> Point -> Int
