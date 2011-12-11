@@ -14,6 +14,7 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Ord (comparing)
 import Data.Function (on)
+-- import Debug.Trace
 
 import Ants
 
@@ -27,6 +28,7 @@ type Config = ([Action], PoiMap)	-- actions and resulting distribution
 type FPoint = (Float, Float)
 
 data EvalPars = EvalPars {
+                    bnd :: Point,	-- we need again and again this bound
                     pes :: Float,	-- weight of the worst case
                     opt :: Float,	-- weight of the best case (100-pes-opt=weight of avg)
                     reg :: Int,		-- weight of enemy ants (100-reg=weight of ours)
@@ -37,32 +39,28 @@ data EvalPars = EvalPars {
 
 -- This function calculates the best final configurations (and the moves
 -- needed to reach them) per fight area
-nextTurn :: Point -> Int -> Int -> GenFun -> EvalPars -> [Point] -> ToMove -> (FPoint, Config)
-nextTurn bound dist dist1 gfun epar us toMove = getMaxs cf cfs
+nextTurn :: Int -> Int -> GenFun -> EvalPars -> [Point] -> ToMove -> (FPoint, Config)
+nextTurn dist dist1 gfun epar us toMove = getMaxs cf cfs
     where getMaxs !acc [] = acc
           getMaxs !acc@(!mx, cs) ((i, c) : cis)
               | i >  mx   = getMaxs (i, c) cis
               -- | i == mx   = getMaxs (i, c) cis
               | otherwise = getMaxs acc cis
-          (cf:cfs) = ourMoves bound dist dist1 gfun epar us toMove
+          (cf:cfs) = ourMoves dist dist1 gfun epar us toMove
 
 -- Evaluate every of our moves with the average of the possible answers
-ourMoves :: Point -> Int -> Int -> GenFun -> EvalPars -> [Point] -> ToMove
-         -> [(FPoint, Config)]
-ourMoves bound dist dist1 gfun epar us toMove = do
+ourMoves :: Int -> Int -> GenFun -> EvalPars -> [Point] -> ToMove -> [(FPoint, Config)]
+ourMoves dist dist1 gfun epar us toMove = do
     let amvs = sortBy (comparing (fst . snd)) $ map (interMove near' near1 gfun 0 toMove M.empty) us
     myc <- nextAnt True near' near1 gfun 0 amvs toMove ([], M.empty)
     let ocfs = nextPlayer near' near1 gfun toMove myc
-        avg  = average (pes epar) (opt epar) $ map (evalOutcome near' epar . snd) ocfs
-        sec  = if agr epar then inv else 0
-        ens  = enemiesOfPlayer 0 toMove
-        -- (gc, va) = gravVar ens
-        gcu = gravCenter us
-        gce = gravCenter ens
-        inv = if gce == gcu then 1 else 1 / fromIntegral (distance bound gce gcu)
-    return ((avg, sec), myc)
-    where near' = near dist  bound
-          near1 = near dist1 bound
+        ooc  = gravCenter us
+        oec  = gravCenter $ enemiesOfPlayer 0 toMove
+        od   = euclidSquare (bnd epar) oec ooc
+        avg  = average (pes epar) (opt epar) $ map (evalOutcome near' epar (oec, od) . snd) ocfs
+    return (avg, myc)
+    where near' = near dist  (bnd epar)
+          near1 = near dist1 (bnd epar)
 
 -- Choose next player to move
 nextPlayer :: DstFun -> DstFun -> GenFun -> ToMove -> Config -> [Config]
@@ -98,14 +96,15 @@ extend f p = (Stay, p) : map (\(d, p') -> (Go d, p')) (f p)
 interMove :: DstFun -> DstFun -> GenFun -> Int -> ToMove -> PoiMap
           -> Point -> (Point, (Int, [(EDir, Point)]))
 interMove near near1 gfun pla toMove pm a = go [] [] $ extend gfun a
-    where go dcc acc [] = if null acc
-                             then (a, (length dcc, dcc))
-                             else (a, (1 + length dcc, (Any acc, a) : dcc))
+    where go dcc acc [] = case acc of
+                              []  -> (a, (length dcc, dcc))
+                              [m] -> (a, (1 + length dcc, m : dcc))
+                              _   -> (a, (1 + length dcc, (Any $ map fst acc, a) : dcc))
           go dcc acc (m@(d, p):ms) = case M.lookup p pm of
              Just _  -> go dcc acc ms
              Nothing -> if any (near1 p) tml || any (near p) cfl
                            then go (m:dcc) acc ms
-                           else go dcc (d:acc) ms
+                           else go dcc (m:acc) ms
           -- tml = concatMap snd $ filter ((/= pla) . fst) $ M.assocs toMove
           tml = enemiesOfPlayer pla toMove
           cfl = map fst $ filter ((/= pla) . snd) $ M.assocs pm
@@ -114,18 +113,26 @@ freeMove :: PoiMap -> [(EDir, Point)] -> [(EDir, Point)]
 freeMove pm = filter (\(_, p) -> M.lookup p pm == Nothing)
 
 -- Having a final configuration we want to evaluate the outcome
--- For now we just make the difference: enemy loss - our loss
--- Bigger is better
-evalOutcome :: DstFun -> EvalPars -> PoiMap -> Int
-evalOutcome near epar final = tgp * 100 + our * (w - 100) + (the - our) * w
+-- We evaluate the difference: enemy loss - our loss
+-- but with variable weight for our and enemy losses
+-- and add perhaps a bonus for occupying the target (if given)
+-- When playing aggresive we also give in a second component
+-- a better score for moves that win space (i.e. go near to the enemy)
+evalOutcome :: DstFun -> EvalPars -> (Point, Int) -> PoiMap -> (Int, Int)
+evalOutcome near epar (oec, od) final = (sc, adv)
     where dds = getLosses near final
           (our, the) = M.fold count (0, 0) dds
           w   = reg epar
           tgp = maybe 0 target (tgt epar)
           (w1, w2) = tgs epar
+          alive = M.difference final dds
+          ealive = filter ((==0) . snd) $ M.assocs alive
+          ngc = gravCenter $ map fst ealive
+          dif = od - euclidSquare (bnd epar) oec ngc
+          adv = if agr epar && not (null ealive) then dif else 0
+          sc = tgp * 100 + our * (w - 100) + (the - our) * w
           count p (a, b) = if p == 0 then (a+1, b) else (a, b+1)
-          target p = let alive = M.difference final dds
-                     in case M.lookup p alive of
+          target p = case M.lookup p alive of
                          Nothing -> 0
                          Just pl -> if pl == 0 then w1 else w2
 
@@ -137,38 +144,8 @@ evalOutcome near epar final = tgp * 100 + our * (w - 100) + (the - our) * w
 -- raze a hill
 -- also we can see if a hill was razed during the fight, by comparing
 -- the alive ants with the hill position (this is done in caller)
-{--
-getLosses :: DstFun -> PoiMap -> PoiMap
-getLosses near final = foldl' accDeads M.empty $ map fst $ filter df eneml
-    where -- pairs = M.assocs final
-          -- eneml = map (nearEnemies near pairs) pairs
-          eneml = combats near $ M.assocs final
-          df (_, (ecnt, es)) = any (deadly ecnt) es
-          -- enemy is at least as strong (i.e. has smaller or equal count!):
-          deadly cnt e = maybe False ((<= cnt) . fst) (lookup e eneml)
-          accDeads d p = maybe d (\pl -> M.insert p pl d) (M.lookup p final)
---}
 getLosses :: DstFun -> PoiMap -> PoiMap
 getLosses near final = deads near $ combats near $ M.assocs final
-
--- For an ant, find the enemies in fight distance
-nearEnemies :: DstFun -> [(Point, Int)] -> (Point, Int) -> (Point, (Int, [Point]))
-nearEnemies near pis pi = (fst pi, (length en, en))
-    where f (a1, p1) (a2, p2) = (a2, p1 /= p2 && near a1 a2)
-          en = map fst . filter snd . zipWith f (repeat pi) $ pis
-
-{--
-combats :: DstFun -> [(Point, Int)] -> [(Point, (Int, [Point]))]
-combats near = map simpl . groupBy ((==) `on` fst) . sort . go []
-    where go acc []       = acc
-          go acc (pi@(p, i):pis) = go rez pis
-              where rez = foldr bat acc pis
-                    bat (q, j) acc
-                        | i == j    = acc
-                        | near p q  = (p, q) : (q, p) : acc
-                        | otherwise = acc
-          simpl li@((p, _):_) = (p, (length li, map snd li))
---}
 
 combats :: DstFun -> [(Point, Int)] -> [((Point, Int), Int)]
 combats near = map simpl . group . sort . go []
@@ -249,12 +226,18 @@ restOursAnts pps = (us, them)
     where us = map snd $ filter ((==0) . fst) $ S.toList pps
           them = filter ((/=0) . fst) $ S.toList pps
 
-average :: Float -> Float -> [Int] -> Float
-average pes opt xs = go (0, 0, 1000000, -1000000) xs
-    where go (!s, !c, !mi, !ma) []     = (mi * pes + (s * av / c) + ma * opt) / 100
-          go (!s, !c, !mi, !ma) (x:xs) = let y = fromIntegral x
-                                         in  go (s+y, c+1, min mi y, max ma y) xs
+-- Calculate an mean, minimum and maximum of achievable scores and combine all
+-- into a final score (with parameter for pessimistic and optimistic behaviour)
+-- Also calculate a mean of space win (second component)
+average :: Float -> Float -> [(Int, Int)] -> (Float, Float)
+average pes opt xs = go (0, 0, maxmax, -maxmax, 0) xs
+    where go (!s, !c, !mi, !ma, !di) [] = ((mi * pes + (s * av / c) + ma * opt) / 100, di / c)
+          go (!s, !c, !mi, !ma, !di) ((x, d):xs)
+              = let y = fromIntegral x
+                    z = fromIntegral d
+                in  go (s+y, c+1, min mi y, max ma y, di+z) xs
           av = 100 - pes - opt
+          maxmax = 10000000
 
 near r u a b = euclidSquare u a b <= r
 

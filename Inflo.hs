@@ -79,7 +79,8 @@ msDecrAst = 300		-- under this time we decrese the AStar searches per turn
 msIncrAst = 450		-- over this time we increse the AStar searches per turn
 maxMaxASt = 60		-- maximum AStar searches per turn
 maxJumps  = 20		-- maximum jump length for jump point search
-attMajority = 2		-- used when attacking many to many
+attMajority = 1		-- used when attacking (beeing more aggresive)
+hotMajority = 2		-- used when creating hot spots
 maxPlanWait = 5		-- how long to wait in a plan when path is blocked
 checkEasyFood = 10	-- how often to check for easy food?
 zoneMax      = 8	-- max ants in a zone fight
@@ -204,19 +205,14 @@ freeAnts foim = mapM_ (perAnt foim)
 -- simple per ant
 perAnt :: InfMap -> Point -> MyGame ()
 perAnt foim pt = do
-    -- debug $ "Point " ++ show pt
     (_, dps) <- getValidDirs pt
-    -- debug $ "Valid " ++ show dps
     if null dps
        then return ()	-- perhaps was already moved or cannot move at all
        else do
            let infs = map inf dps
                mi   = minimum $ map fst infs
                prs  = map (sqrm mi) infs
-           -- debug $ "Infs  : " ++ show infs
-           -- debug $ "Choose: " ++ show prs
            d <- choose prs
-           -- debug $ "Take: " ++ show d
            orderMove pt d "perAnt"
            return ()
     where inf (d, p) = (foim!p, d)
@@ -278,27 +274,32 @@ fightAnts fs
             r0  = attackradius2 gp
         tr <- lift $ timeRemaining gp gs
         go r0 r1 tr fs'
-    where fs' = filter (\(ps, tm) -> length ps + points tm <= zoneMax) fs
+    where fs' = map fst $ sortBy (comparing snd)
+                        $ filter ((>= -zoneMax) . snd)
+                        $ map (\fz@(ps, tm) -> (fz, - (length ps + points tm))) fs
           go _ _ _   [] = return ()
-          go a b tr0 (fz@(ps, tm):fzs) = do
+          go a b tr0 (fz@(us, tm):fzs) = do
              st <- get
              let deltat = tr0 - msReserve
-                 lp = length ps + points tm
-                 sf = stStatsFi st
-                 tn = estimateTime sf lp
-             debug $ "Remaining: " ++ show tr0 ++ ", estimate time: " ++ show tn
+                 usl = length us
+                 thl = points tm
+                 lp  = usl + thl
+                 maj = usl - thl
+                 sf  = stStatsFi st
+                 tn  = estimateTime sf lp
+             -- debug $ "Remaining: " ++ show tr0 ++ ", estimate time: " ++ show tn
              when (deltat >= tn) $ do
-                 perFightZone a b fz
+                 perFightZone a b fz maj
                  let gp = stPars st
                      gs = stState st
                  tr <- lift $ timeRemaining gp gs
                  let fis = addParVal sf lp (tr0 - tr)
-                 debug $ "Actually: " ++ show (tr0 - tr)
+                 -- debug $ "Actually: " ++ show (tr0 - tr)
                  modify $ \s -> s { stStatsFi = fis }
                  go a b tr fzs
 
-perFightZone r0 r1 fz@(us, themm) = do
-    ho <- makeHotSpot fz
+perFightZone r0 r1 fz@(us, themm) maj = do
+    ho <- makeHotSpot fz maj
     st <- get
     ibusy <- liftIO $ do
              busy <- mapArray id (stBusy st)
@@ -306,32 +307,29 @@ perFightZone r0 r1 fz@(us, themm) = do
              unsafeFreeze busy
     let u   = stUpper st
         -- here are the parameter of the evaluation
-        epar = fightParams st fz
-        (sco, cfs) = nextTurn u r0 r1 (valDirs ibusy u) epar us themm
+        epar = fightParams st fz ho maj
+        (sco, cfs) = nextTurn r0 r1 (valDirs ibusy u) epar us themm
         oac = fst cfs
-    debug $ "Fight zone: us = " ++ show us ++ ", them = " ++ show themm
-    debug $ "Params: " ++ show epar ++ " score = " ++ show sco ++ "\nOur moves: " ++ show oac
+    -- debug $ "Fight zone: us = " ++ show us ++ ", them = " ++ show themm
+    -- debug $ "Params: " ++ show epar ++ " score = " ++ show sco ++ "\nOur moves: " ++ show oac
     mapM_ extOrderMove oac
     where valDirs :: UArray Point Bool -> Point -> Point -> [(Dir, Point)]
           valDirs w u pt = filter (not . (w!) . snd) $ map (\d -> (d, move u pt d)) allDirs
 
 points tm = sum $ map length $ M.elems tm
 
-fightParams st fz@(us, themm) = EvalPars { pes = pes', opt = 0, reg = reg',
-                                           agr = agr', tgt = tgt', tgs = tgs' }
+fightParams st fz@(us, themm) ho maj
+    = EvalPars { bnd = u, pes = pes', opt = 0, reg = reg',
+                 agr = agr', tgt = tgt', tgs = tgs' }
     where u   = stUpper st
           gp  = stPars st
           gs  = stState st
           c   = stOurCnt st
-          ho  = hotSpot fz
           nhills = inRadius2 fst (homeRadius gp) u ho $ hills gs
           (ohills, ehills) = partition ((==0) . snd) nhills
-          usl  = length us
-          thl  = points themm
-          maj  = usl - thl
-          reg' = min 100 $ c * c `div` 200	-- by 0 is 0, by 100 is 50, maximum is 100
-          agr' = maj >= 1
-          pes' = if null nhills then 70 else 20
+          reg' = min 60 $ c * c `div` 200	-- by 0 is 0, by 100 is 50, maximum is 100
+          agr' = maj >= attMajority
+          pes' = if null nhills then 70 else 90
           (tgt', tgs') | null ohills && null ehills = (Nothing, (0, 0))
                        | null ohills = (Just $ fst $ head ehills, (100, 0))
                        | otherwise   = (Just $ fst $ head ohills, (0, -100))
@@ -346,12 +344,12 @@ extOrderMove (pt, edir) = do
 libGrad :: Point -> [EDir] -> MyGame ()
 libGrad p es = modify $ \s -> s { stLibGrad = M.insert p es (stLibGrad s) }
 
-hotSpot (us, tm) = head us
--- hotSpot (us, tm) = gravCenter $ us ++ concat (M.elems tm)
+-- hotSpot (us, tm) = head us
+hotSpot (us, tm) = gravCenter $ us ++ concat (M.elems tm)
 
-makeHotSpot fz = do
+makeHotSpot fz maj = do
     let gc = hotSpot fz
-    modify $ \s -> s { stHotSpots = gc : stHotSpots s }
+    when (maj < hotMajority) $ modify $ \s -> s { stHotSpots = gc : stHotSpots s }
     return gc
 
 markWait pt = do
