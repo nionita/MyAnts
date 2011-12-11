@@ -53,7 +53,8 @@ data Persist = Persist {
          peEnHills :: [Point],	-- enemy hills (not razed by us)
          peStatsFi :: !Stats,	-- time statistics for fight
          peStatsAs :: !Stats,	-- time statistics for aStar
-         peIMap    :: !InfMap	-- influence map
+         peIMap    :: !InfMap,	-- general influence map
+         peIMapOur :: !InfMap	-- influence map for our ants (against crowd)
      }
 
 type MyGame a = forall r. CPS r MyState IO a
@@ -98,6 +99,7 @@ foodIMMax = 1000	-- maximum influence for food
 enhiIMMax = 3000	-- maximum influence for enemy hill
 hotsIMMax =  500	-- maximum influence for hot spots
 enanIMMax =  800	-- maximum influence for enemy ants in home zone
+ouspIMMax =  300	-- maximum influence for our ants (negative influence)
 homeDefProc = 10	-- percent of our ants which should defend
 homeDefRate = 100	-- increase per missing ant for home defend
 timeIMDec = 20		-- time decay for food in percent (remaining)
@@ -115,7 +117,7 @@ doTurn gp gs = do
                    nseen <- newArray b False
                    let empIM = listArray b $ repeat 0
                    return $ Persist { peSeen = nseen, pePlMemo = M.empty, peEnHills = [],
-                                      peIMap = empIM,
+                                      peIMap = empIM, peIMapOur = empIM,
                                       peStatsFi = newStats 1 25, peStatsAs = newStats 10 25 }
   updateSeen gs (peSeen npers)
   -- these are enemy hills we see this turn
@@ -154,13 +156,15 @@ doTurn gp gs = do
                (enants, enanIMMax),		-- enemy ants near our home
                (hi, enhiIMMax),			-- enemy hills
                (stHotSpots st1, hotsIMMax)]	-- hotspots
-  im <- updateIM (timeRemaining gp gs) uwater (peIMap npers) $ attrs ++ hattrs
+      oattrs = [(ours gs, ouspIMMax)]
+  im  <- updateIM (timeRemaining gp gs) False uwater (peIMap npers) $ attrs ++ hattrs
+  imo <- updateIM (timeRemaining gp gs) True  uwater (peIMapOur npers) oattrs
   let fas = sortFreeAnts st1	-- the ones near important points first
-  stf <- execState (freeAnts im fas) st1	-- then the free ants
+  stf <- execState (freeAnts im imo fas) st1	-- then the free ants
   restTime <- timeRemaining gp gs
   let plans = M.fromList $ stPlans stf
-      !fpers = (stPersist stf) { pePlMemo = plans, peIMap = im,
-                                peStatsFi = stStatsFi stf, peStatsAs = stStatsAs stf }
+      !fpers = (stPersist stf) { pePlMemo = plans, peIMap = im, peIMapOur = imo,
+                                 peStatsFi = stStatsFi stf, peStatsAs = stStatsAs stf }
       orders = stOrders stf
   hPutStrLn stderr $ "Time remaining (ms): " ++ show restTime
                         ++ ", ants: " ++ show (stOurCnt stf)
@@ -200,11 +204,11 @@ homeDefenders gp u cnt os as pt = (pt, v, aa)
 
 -- Orders for the free ants (i.e. not fighting)
 -- freeAnts :: InfMap -> [Point] -> MyGame ()
-freeAnts foim = mapM_ (perAnt foim)
+freeAnts foim ouim = mapM_ (perAnt foim ouim)
 
 -- simple per ant
-perAnt :: InfMap -> Point -> MyGame ()
-perAnt foim pt = do
+perAnt :: InfMap -> InfMap -> Point -> MyGame ()
+perAnt foim ouim pt = do
     (_, dps) <- getValidDirs pt
     if null dps
        then return ()	-- perhaps was already moved or cannot move at all
@@ -215,7 +219,7 @@ perAnt foim pt = do
            d <- choose prs
            orderMove pt d "perAnt"
            return ()
-    where inf (d, p) = (foim!p, d)
+    where inf (d, p) = (foim!p - ouim!p, d)
           -- which means: we weight the food and the enemy hills with different factors
           -- and multiply with another factor to get an entry for choose
           sqrm m (s, d) = let s1 = s - m in (s1*s1, d)
@@ -240,11 +244,11 @@ freeAnts points = do
   freeAnts $ tail points
 --}
 
-updateIM :: IO Int -> RBitMap -> InfMap -> [([Point], Int)] -> IO InfMap
-updateIM trio rbm im phs = go $ amap decay im // asc
+updateIM :: IO Int -> Bool -> RBitMap -> InfMap -> [([Point], Int)] -> IO InfMap
+updateIM trio once rbm im phs = go $ amap decay im // asc
     where go a = do
              let a' = a `seq` difStep rbm a
-             if a' == a
+             if once || a' == a
                 then return a'
                 else do
                    tr <- trio

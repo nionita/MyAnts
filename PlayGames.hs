@@ -1,7 +1,8 @@
 module Main where
 
 import Control.Applicative ((<$>))
-import Control.Monad (filterM)
+import Control.Concurrent (threadDelay)
+import Control.Monad (filterM, liftM, liftM2)
 import Data.List
 import Data.Maybe (mapMaybe, fromJust)
 import qualified Data.Map as M
@@ -58,30 +59,32 @@ configRecord conf = CF {
     }
 
 runWith cf opts = do
-    maps <- getMaps cf
-    r <- randomRIO (0, length maps - 1)
-    let mymap = maps!!r
-        pl = fromJust $ playerNum mymap
-    putStrLn $ "Choose map " ++ mymap ++ " with " ++ show pl ++ " players"
+    maps  <- getMaps cf
+    mymap <- pickRandom maps
+    let pl = fromJust $ playerNum mymap
+    engs <- randomEngines (pl-1) (M.elems $ cfEngines cf)
+    putStrLn $ "Map " ++ mymap ++ " (" ++ show pl ++ " players)"
     let logs = "--log_dir " ++ (cfRoot cf </> cfLogDir cf)
         trns = "--turns " ++ show (cfTurns cf)
         mapf = "--map_file " ++ mymap
-    engs <- map quote <$> randomEngines (pl-1) (M.elems $ cfEngines cf)
-    let cmd = unwords $ [ cfPlay cf, logs, trns, cfPars cf, mapf, cfEngine cf] ++ engs
-    putStrLn "CmdLine:"
-    putStrLn cmd
+        me = cfEngine cf
+        qengs = map quote engs
+    putStrLn "Engines:"
+    putStrLn me
+    mapM_ putStrLn engs
+    let cmd = unwords $ [ cfPlay cf, logs, trns, cfPars cf, mapf, me] ++ qengs
+    threadDelay 1000000 -- sleep 1 second before start
     system cmd
-    return ()
+    putStrLn $ "This was: map " ++ mymap ++ " (" ++ show pl ++ " players)"
+    putStrLn "Engines:"
+    putStrLn me
+    mapM_ putStrLn engs
 
 getMaps :: ConfigRecord -> IO [String]
 getMaps cf = do
     let mdir = cfRoot cf </> cfMaps cf
     msdirs <- map (mdir </>) <$> filter ((/= '.') . head) <$> onlyDirs mdir
-    -- putStrLn "Map subdirs:"
-    -- mapM_ putStrLn msdirs
     maps   <- concat <$> mapM getMapFiles msdirs
-    -- putStrLn "Maps:"
-    -- mapM_ putStrLn maps
     return maps
 
 onlyDirs path = getDirectoryContents path >>= filterM (\f -> doesDirectoryExist $ path </> f)
@@ -100,12 +103,28 @@ playerNum s = go $ infix0 ++ infix1
           go ((ifi, k):is) = if ifi `isInfixOf` s then Just k else go is
 
 randomEngines :: Int -> [String] -> IO [String]
-randomEngines n es = go [] n
-    where l = length es - 1
-          go acc 0 = return acc
+randomEngines n es
+    | l >= n = liftM (take n) $ randomPerm es
+    | l <  n = liftM2 (++) (randomPerm es) (go [] (n-l))
+    where go acc 0 = return acc
           go acc k = do
-             r <- randomRIO (0, l)
-             go ((es!!r) : acc) (k-1)
+             r <- pickRandom es
+             go (r : acc) (k-1)
+          l = length es
+
+-- Pick a random element from a non empty list
+pickRandom :: [a] -> IO a
+pickRandom as = do
+    r <- randomRIO (0, length as - 1)
+    return (as!!r)
+
+-- Make a random permutation of a list
+randomPerm :: Eq a => [a] -> IO [a]
+randomPerm [] = return []
+randomPerm as = do
+    r  <- pickRandom as
+    rs <- randomPerm $ delete r as
+    return (r : rs)
 
 quote :: String -> String
 quote x = '"' : x ++ ['"']
