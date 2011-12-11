@@ -96,10 +96,11 @@ razeRadius   =        const 1900	-- in which we consider to raze enemy hills
 dangerRadius = (1*) . attackradius2	-- in which we are in danger
 kamikaRadius = (1*) . attackradius2	-- we try a one to one fight (as we die anyway)
 foodIMMax = 1000	-- maximum influence for food
-enhiIMMax = 3000	-- maximum influence for enemy hill
+enhiIMMax0 = 2000	-- influence for enemy hill: constant factor
+enhiIMMax1 = 100	-- influence for enemy hill: linear factor (* our ants)
 hotsIMMax =  500	-- maximum influence for hot spots
 enanIMMax =  800	-- maximum influence for enemy ants in home zone
-ouspIMMax =  300	-- maximum influence for our ants (negative influence)
+ouspIMMax =  900	-- maximum influence for our ants (negative influence)
 homeDefProc = 10	-- percent of our ants which should defend
 homeDefRate = 100	-- increase per missing ant for home defend
 timeIMDec = 20		-- time decay for food in percent (remaining)
@@ -152,9 +153,10 @@ doTurn gp gs = do
       -- collect all our homes with deficit in defence and the attacking enemy ants
       (hattrs, enants) = foldl collect ([], [])
                              $ map (homeDefenders gp (snd b) (stOurCnt st1) (ours gs) as) hio
+      enhi = enhiIMMax0 + enhiIMMax1 * stOurCnt st0	-- when we have more ants, stronger attack
       attrs = [(foodP gs, foodIMMax),		-- food
                (enants, enanIMMax),		-- enemy ants near our home
-               (hi, enhiIMMax),			-- enemy hills
+               (hi, enhi),			-- enemy hills
                (stHotSpots st1, hotsIMMax)]	-- hotspots
       oattrs = [(ours gs, ouspIMMax)]
   im  <- updateIM (timeRemaining gp gs) False uwater (peIMap npers) $ attrs ++ hattrs
@@ -213,10 +215,14 @@ perAnt foim ouim pt = do
     if null dps
        then return ()	-- perhaps was already moved or cannot move at all
        else do
+           debug $ "Ant: " ++ show pt
            let infs = map inf dps
                mi   = minimum $ map fst infs
                prs  = map (sqrm mi) infs
+           debug $ "Scores:  " ++ show infs
+           debug $ "Choices: " ++ show prs
            d <- choose prs
+           debug $ "Take: " ++ show d
            orderMove pt d "perAnt"
            return ()
     where inf (d, p) = (foim!p - ouim!p, d)
