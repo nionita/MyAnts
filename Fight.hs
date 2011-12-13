@@ -14,9 +14,12 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Ord (comparing)
 import Data.Function (on)
--- import Debug.Trace
+import Debug.Trace
 
 import Ants
+
+-- mytrace = trace
+mytrace _ x = x
 
 data EDir = Any [EDir] | Stay | Go Dir deriving (Eq, Show)	-- extended direction, as we can also choose to wait
 type Action = (Point, EDir)		-- start point and direction to move
@@ -40,7 +43,7 @@ data EvalPars = EvalPars {
 -- This function calculates the best final configurations (and the moves
 -- needed to reach them) per fight area
 nextTurn :: Int -> Int -> GenFun -> EvalPars -> [Point] -> ToMove -> (FPoint, Config)
-nextTurn dist dist1 gfun epar us toMove = getMaxs cf cfs
+nextTurn dist dist1 gfun epar us toMove = mytrace ("our moves: " ++ show (cf:cfs)) $ getMaxs cf cfs
     where getMaxs !acc [] = acc
           getMaxs !acc@(!mx, cs) ((i, c) : cis)
               | i >  mx   = getMaxs (i, c) cis
@@ -51,9 +54,9 @@ nextTurn dist dist1 gfun epar us toMove = getMaxs cf cfs
 -- Evaluate every of our moves with the average of the possible answers
 ourMoves :: Int -> Int -> GenFun -> EvalPars -> [Point] -> ToMove -> [(FPoint, Config)]
 ourMoves dist dist1 gfun epar us toMove = do
-    let amvs = sortBy (comparing (fst . snd)) $ map (interMove near' near1 gfun 0 toMove M.empty) us
-    myc <- nextAnt True near' near1 gfun 0 amvs toMove ([], M.empty)
-    let ocfs = nextPlayer near' near1 gfun toMove myc
+    let amvs = sortBy (comparing (fst . snd)) $ map (interMove near' near1 gfun epar 0 toMove M.empty) us
+    myc <- nextAnt True near' near1 gfun epar 0 amvs toMove ([], M.empty)
+    let ocfs = nextPlayer near' near1 gfun epar toMove myc
         ooc  = gravCenter us
         oec  = gravCenter $ enemiesOfPlayer 0 toMove
         od   = euclidSquare (bnd epar) oec ooc
@@ -63,48 +66,52 @@ ourMoves dist dist1 gfun epar us toMove = do
           near1 = near dist1 (bnd epar)
 
 -- Choose next player to move
-nextPlayer :: DstFun -> DstFun -> GenFun -> ToMove -> Config -> [Config]
-nextPlayer near near1 gfun toMove conf
+nextPlayer :: DstFun -> DstFun -> GenFun -> EvalPars -> ToMove -> Config -> [Config]
+nextPlayer near near1 gfun epar toMove conf
     | M.null toMove = return conf
     | otherwise     = do
         let (pla, pants) = M.findMin toMove
             toMove' = M.delete pla toMove
             amvs = sortBy (comparing (fst . snd))
-                      $ map (interMove near near1 gfun pla toMove (snd conf)) pants
-        nextAnt False near near1 gfun pla amvs toMove' conf
+                      $ map (interMove near near1 gfun epar pla toMove (snd conf)) pants
+        nextAnt False near near1 gfun epar pla amvs toMove' conf
 
 -- Choose next ant to move, make all valid (and interesting) moves
 -- Functions near and near1 are used to prune uninteresting moves
 -- near ist the fight distance, near1 ist fight distance "+ 1" (i.e. one move
 -- from the fight distance)
-nextAnt :: Bool -> DstFun -> DstFun -> GenFun -> Int -> [(Point, (Int, [(EDir, Point)]))]
+nextAnt :: Bool -> DstFun -> DstFun -> GenFun -> EvalPars -> Int -> [(Point, (Int, [(EDir, Point)]))]
         -> ToMove -> Config -> [Config]
-nextAnt stop near near1 gfun _   []                 toMove conf
-    = if stop then return conf else nextPlayer near near1 gfun toMove conf
-nextAnt stop near near1 gfun pla ((a, (_, mvs)):as) toMove (acs, mp) = do
+nextAnt stop near near1 gfun epar _   []                 toMove conf
+    = if stop then return conf else nextPlayer near near1 gfun epar toMove conf
+nextAnt stop near near1 gfun epar pla ((a, (_, mvs)):as) toMove (acs, mp) = do
     (d, p) <- freeMove mp mvs
     let acts = (a, d) : acs
         final = case d of
                   Any ds -> mp
                   _      -> M.insert p pla mp
-    nextAnt stop near near1 gfun pla as toMove (acts, final)
+    nextAnt stop near near1 gfun epar pla as toMove (acts, final)
 
 extend :: (Point -> [(Dir, Point)]) -> Point -> [(EDir, Point)]
 extend f p = (Stay, p) : map (\(d, p') -> (Go d, p')) (f p)
 
 -- Filter all possible moves: must not go to a busy point and must be interesting
-interMove :: DstFun -> DstFun -> GenFun -> Int -> ToMove -> PoiMap
+interMove :: DstFun -> DstFun -> GenFun -> EvalPars -> Int -> ToMove -> PoiMap
           -> Point -> (Point, (Int, [(EDir, Point)]))
-interMove near near1 gfun pla toMove pm a = go [] [] $ extend gfun a
+interMove near near1 gfun epar pla toMove pm a = go [] [] $ extend gfun a
     where go dcc acc [] = case acc of
                               []  -> (a, (length dcc, dcc))
                               [m] -> (a, (1 + length dcc, m : dcc))
                               _   -> (a, (1 + length dcc, (Any $ map fst acc, a) : dcc))
           go dcc acc (m@(d, p):ms) = case M.lookup p pm of
              Just _  -> go dcc acc ms
-             Nothing -> if any (near1 p) tml || any (near p) cfl
-                           then go (m:dcc) acc ms
-                           else go dcc (m:acc) ms
+             Nothing -> case tgt epar of
+                 Nothing -> if any (near1 p) tml || any (near p) cfl
+                               then go (m:dcc) acc ms
+                               else go dcc (m:acc) ms
+                 Just h  -> if h == p || any (near1 p) tml || any (near p) cfl
+                               then go (m:dcc) acc ms
+                               else go dcc (m:acc) ms
           -- tml = concatMap snd $ filter ((/= pla) . fst) $ M.assocs toMove
           tml = enemiesOfPlayer pla toMove
           cfl = map fst $ filter ((/= pla) . snd) $ M.assocs pm
@@ -119,7 +126,7 @@ freeMove pm = filter (\(_, p) -> M.lookup p pm == Nothing)
 -- When playing aggresive we also give in a second component
 -- a better score for moves that win space (i.e. go near to the enemy)
 evalOutcome :: DstFun -> EvalPars -> (Point, Int) -> PoiMap -> (Int, Int)
-evalOutcome near epar (oec, od) final = (sc, adv)
+evalOutcome near epar (oec, od) final = mytrace tr $ sc `seq` adv `seq` (sc, adv)
     where dds = getLosses near final
           (our, the) = M.fold count (0, 0) dds
           w   = reg epar
@@ -135,6 +142,8 @@ evalOutcome near epar (oec, od) final = (sc, adv)
           target p = case M.lookup p alive of
                          Nothing -> 0
                          Just pl -> if pl == 0 then w1 else w2
+          tr = show final ++ ":\n" ++ show (sc, adv) ++ ", deads = " ++ show dds
+                 ++ ", alive = " ++ show alive ++ ", tgp = " ++ show tgp
 
 -- We return the dead ants per (involved) player (a map)
 -- and a map of dead ants (value: player)

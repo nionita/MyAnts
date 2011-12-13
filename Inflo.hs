@@ -89,8 +89,8 @@ cntLastAttack = 200	-- when we are so many, go to last attack
 stepsToBlood = 15	-- afterwhich we reconsider
 viewRadius   = (1*) . viewradius2	-- visibility radius
 foodRadius   = (1*) . const 100	-- in which we go to food
-homeRadius   = (1*) . const 100	-- in which we consider to be at home
-homeRadius2  = (1*) . const 400	-- in which we consider to be at home
+homeRadius   = (1*) . const  50	-- in which we consider to be at home
+homeRadius2  = (1*) . const 225	-- in which we consider to be at home
 razeRadius   =        const 1900	-- in which we consider to raze enemy hills
 dangerRadius = (1*) . attackradius2	-- in which we are in danger
 kamikaRadius = (1*) . attackradius2	-- we try a one to one fight (as we die anyway)
@@ -218,7 +218,8 @@ perAnt foim pt = do
     where inf (d, p) = (foim!p, d)
           -- which means: we weight the food and the enemy hills with different factors
           -- and multiply with another factor to get an entry for choose
-          sqrm m (s, d) = let s1 = s - m in (s1*s1, d)
+          -- sqrm m (s, d) = let s1 = s - m in (s1*s1, d)
+          sqrm m (s, d) = let s1 = s - m in (s1, d)
 
 {--
 freeAnts [] = return ()
@@ -329,7 +330,7 @@ fightParams st fz@(us, themm) ho maj
           (ohills, ehills) = partition ((==0) . snd) nhills
           reg' = min 60 $ c * c `div` 200	-- by 0 is 0, by 100 is 50, maximum is 100
           agr' = maj >= attMajority
-          pes' = if null nhills then 70 else 90
+          pes' = if null nhills then 75 else 90
           (tgt', tgs') | null ohills && null ehills = (Nothing, (0, 0))
                        | null ohills = (Just $ fst $ head ehills, (100, 0))
                        | otherwise   = (Just $ fst $ head ohills, (0, -100))
