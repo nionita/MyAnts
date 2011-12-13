@@ -94,7 +94,6 @@ homeRadius   = (1*) . const 100	-- in which we consider to be at home
 homeRadius2  = (1*) . const 400	-- in which we consider to be at home
 razeRadius   =        const 1900	-- in which we consider to raze enemy hills
 dangerRadius = (1*) . attackradius2	-- in which we are in danger
-kamikaRadius = (1*) . attackradius2	-- we try a one to one fight (as we die anyway)
 foodIMMax = 1000	-- maximum influence for food
 enhiIMMax0 = 2000	-- influence for enemy hill: constant factor
 enhiIMMax1 = 100	-- influence for enemy hill: linear factor (* our ants)
@@ -105,6 +104,9 @@ homeDefProc = 10	-- percent of our ants which should defend
 homeDefRate = 100	-- increase per missing ant for home defend
 timeIMDec = 20		-- time decay for food in percent (remaining)
 spaceIMDec = 90		-- space decay for all in percent (remaining)
+
+exploreFact :: Int
+exploreFact = 10
 
 doTurn :: GameParams -> GameState Persist -> IO ([Order], GameState Persist)
 doTurn gp gs = do
@@ -160,12 +162,12 @@ doTurn gp gs = do
                (stHotSpots st1, hotsIMMax)]	-- hotspots
       oattrs = [(ours gs, ouspIMMax)]
   im  <- updateIM (timeRemaining gp gs) False uwater (peIMap npers) $ attrs ++ hattrs
-  imo <- updateIM (timeRemaining gp gs) True  uwater (peIMapOur npers) oattrs
+  -- imo <- updateIM (timeRemaining gp gs) True  uwater (peIMapOur npers) oattrs
   let fas = sortFreeAnts st1	-- the ones near important points first
-  stf <- execState (freeAnts im imo fas) st1	-- then the free ants
+  stf <- execState (freeAnts im fas) st1	-- then the free ants
   restTime <- timeRemaining gp gs
   let plans = M.fromList $ stPlans stf
-      !fpers = (stPersist stf) { pePlMemo = plans, peIMap = im, peIMapOur = imo,
+      !fpers = (stPersist stf) { pePlMemo = plans, peIMap = im, -- peIMapOur = imo,
                                  peStatsFi = stStatsFi stf, peStatsAs = stStatsAs stf }
       orders = stOrders stf
   hPutStrLn stderr $ "Time remaining (ms): " ++ show restTime
@@ -206,27 +208,36 @@ homeDefenders gp u cnt os as pt = (pt, v, aa)
 
 -- Orders for the free ants (i.e. not fighting)
 -- freeAnts :: InfMap -> [Point] -> MyGame ()
-freeAnts foim ouim = mapM_ (perAnt foim ouim)
+freeAnts foim = mapM_ (perAnt foim)
 
 -- simple per ant
-perAnt :: InfMap -> InfMap -> Point -> MyGame ()
-perAnt foim ouim pt = do
+perAnt :: InfMap -> Point -> MyGame ()
+perAnt foim pt = do
     (_, dps) <- getValidDirs pt
     if null dps
        then return ()	-- perhaps was already moved or cannot move at all
        else do
-           debug $ "Ant: " ++ show pt
-           let infs = map inf dps
-               mi   = minimum $ map fst infs
-               prs  = map (sqrm mi) infs
-           debug $ "Scores:  " ++ show infs
-           debug $ "Choices: " ++ show prs
-           d <- choose prs
-           debug $ "Take: " ++ show d
-           orderMove pt d "perAnt"
-           return ()
-    where inf (d, p) = (foim!p - ouim!p, d)
-          -- which means: we weight the food and the enemy hills with different factors
+           hasPlan <- followPlan pt
+           when (not hasPlan) $ do
+               let infs = map inf dps
+                   (v:vs) = map fst infs
+                   alle = all (== v) vs
+               if alle
+                  then do
+                      ex <- lift $ randomRIO (0, exploreFact)
+                      if ex == 0
+                         then explore pt >> return ()
+                         else followInfMap pt infs
+                  else followInfMap pt infs
+    where inf (d, p) = (foim!p, d)
+
+followInfMap pt infs = do
+    let mi   = minimum $ map fst infs
+        prs  = map (sqrm mi) infs
+    d <- choose prs
+    orderMove pt d "perAnt"
+    return ()
+    where -- which means: we weight the food and the enemy hills with different factors
           -- and multiply with another factor to get an entry for choose
           sqrm m (s, d) = let s1 = s - m in (s1*s1, d)
 
@@ -830,7 +841,7 @@ explore pt = do
                 then go u i
                 else do
                   wa <- isWater n
-                  se <- seenPoint n
+                  se <- return False	-- seenPoint n
                   if wa || se then go u (i-1) else gotoPoint False pt n
 
 sortFreeAnts :: MyState -> [Point]
