@@ -17,6 +17,7 @@ import Data.Ord (comparing)
 import qualified Data.Set as S
 import System.IO
 import System.Random
+import Debug.Trace
 
 import StateT
 import Ants
@@ -33,7 +34,7 @@ data MyState = MyState {
          stUpper   :: !Point,			-- upper bound of the world
          stOrders  :: [Order],			-- accumulates orders
          stPlans   :: [(Point, Plan)],		-- accumulates plans
-         stWeakEH  :: [(Point, (Int, Int))],	-- weakness of enemy hills
+         stHills   :: [(Point, Int)],		-- alive hills
          stFrFood  :: !Food,			-- still untargeted food
          stLibGrad :: !LibGrad,			-- which ant can move where
          stHotSpots:: [Point],			-- battle centres
@@ -50,7 +51,7 @@ data MyState = MyState {
 data Persist = Persist {
          peSeen    :: !BitMap,	-- fields where we were
          pePlMemo  :: !PlanMemo,	-- our plans
-         peEnHills :: [Point],	-- enemy hills (not razed by us)
+         peHills   :: [(Point, Int)],	-- hills we remember (not known to be razed)
          peStatsFi :: !Stats,	-- time statistics for fight
          peStatsAs :: !Stats,	-- time statistics for aStar
          peIMap    :: !InfMap,	-- general influence map
@@ -100,10 +101,12 @@ enhiIMMax1 = 100	-- influence for enemy hill: linear factor (* our ants)
 hotsIMMax =  500	-- maximum influence for hot spots
 enanIMMax =  800	-- maximum influence for enemy ants in home zone
 ouspIMMax =  900	-- maximum influence for our ants (negative influence)
-homeDefProc = 10	-- percent of our ants which should defend
-homeDefRate = 100	-- increase per missing ant for home defend
+homeDefProc = 5		-- percent of our ants which should defend
+homeDefRate = 30	-- increase per missing ant for home defend
 timeIMDec = 20		-- time decay for food in percent (remaining)
 spaceIMDec = 90		-- space decay for all in percent (remaining)
+radNetDensity = 3	-- density of ants on the defence radius (ants / visibility)
+circIMMax = 100		-- maximum influence on the home circumference
 
 exploreFact :: Int
 exploreFact = 10
@@ -112,6 +115,7 @@ doTurn :: GameParams -> GameState Persist -> IO ([Order], GameState Persist)
 doTurn gp gs = do
   busy <- initBusy gs
   b <- getBounds $ water gs
+  let upper = snd b
   -- get the persistent information (between turns)
   npers <- case userState gs of
                -- Just pers -> return $ cleanDeadPlans gs pers	-- is it necessary?
@@ -119,52 +123,54 @@ doTurn gp gs = do
                Nothing   -> do
                    nseen <- newArray b False
                    let empIM = listArray b $ repeat 0
-                   return $ Persist { peSeen = nseen, pePlMemo = M.empty, peEnHills = [],
+                   return $ Persist { peSeen = nseen, pePlMemo = M.empty, peHills = [],
                                       peIMap = empIM, peIMapOur = empIM,
                                       peStatsFi = newStats 1 25, peStatsAs = newStats 10 25 }
   updateSeen gs (peSeen npers)
   -- these are enemy hills we see this turn
-  let (hio', hinow') = partition ((== 0) . snd) $ hills gs
-      hio   = map fst hio'
-      hinow = map fst hinow'
+  let hAlive = aliveHills upper (viewRadius gp) (hills gs) (peHills npers) (ours gs)
+      (hio', hinow') = partition ((== 0) . snd) hAlive
+      hio = map fst hio'
+      hi  = map fst hinow'
+  -- hPutStrLn stderr $ "Alive hills: " ++ show hAlive
   -- take only the active ones (actually not razed by us)
-  hi <- filterM (liftM not . readArray (peSeen npers)) $ nub $ hinow ++ peEnHills npers
+  -- hi <- filterM (liftM not . readArray (peSeen npers)) $ nub $ hinow ++ peHills npers
   -- restTime0 <- timeRemaining gp gs
-  let attacs = map (hillAttacs (snd b) (razeRadius gp) (homeRadius gp) (ours gs) (map snd $ ants gs)) hi
-      tfood = S.fromList $ map plTarget $ M.elems (pePlMemo npers)	-- plan targets
+  let -- tfood = S.fromList $ map plTarget $ M.elems (pePlMemo npers)	-- plan targets
       !st0 = MyState {
                    stPars = gp, stState = gs, stBusy = busy,
-                   stPersist = npers { peEnHills = hi },
-                   stUpper = snd b, stOrders = [], stPlans = [],
-                   stOurCnt = length (ours gs), stWeakEH = attacs,
-                   stLibGrad = M.empty,
-                   -- stHotSpots = [], stFrFood = food gs, -- `S.difference` tfood
-                   stHotSpots = [], stFrFood = S.empty, -- `S.difference` tfood
+                   stPersist = npers { peHills = hAlive }, stUpper = upper,
+                   stOrders = [], stPlans = [], stOurCnt = length (ours gs),
+                   stHills = hAlive, stLibGrad = M.empty,
+                   stHotSpots = [], stFrFood = food gs, -- `S.difference` tfood
+                   -- stHotSpots = [], stFrFood = S.empty, -- `S.difference` tfood
                    -- stCanStay = True, stValDirs = [], stTimeRem = restTime, stCParam = 0,
                    stCanStay = True, stValDirs = [], stCParam = 0,
                    stStatsFi = peStatsFi npers, stStatsAs = peStatsAs npers, stDeltat = 0
                }
       zoneRadius2 = hellSteps (attackradius2 gp) 2
-      fzs = fightZones (snd b) zoneRadius2 (ours gs) (ants gs) []
+      fzs = fightZones upper zoneRadius2 (ours gs) (ants gs) []
   -- when (not $ null fzs) $ hPutStrLn stderr $ "Fight zones:\n" ++ show fzs
   st1 <- execState (fightAnts fzs) st0	-- first the fighting ants
   restTime <- timeRemaining gp gs
   hPutStrLn stderr $ "Time remaining (ms) after fight: " ++ show restTime
   uwater <- unsafeFreeze (water gs)
   let as = map snd $ ants gs
+      -- set a net of attractors around our homes
+      reseaux = fishNet upper (viewRadius gp) hio (ours gs)
       -- collect all our homes with deficit in defence and the attacking enemy ants
       (hattrs, enants) = foldl collect ([], [])
-                             $ map (homeDefenders gp (snd b) (stOurCnt st1) (ours gs) as) hio
+                             $ map (homeDefenders gp upper (stOurCnt st1) (ours gs) as) hio
       enhi = enhiIMMax0 + enhiIMMax1 * stOurCnt st0	-- when we have more ants, stronger attack
       attrs = [(foodP gs, foodIMMax),		-- food
                (enants, enanIMMax),		-- enemy ants near our home
                (hi, enhi),			-- enemy hills
                (stHotSpots st1, hotsIMMax)]	-- hotspots
       oattrs = [(ours gs, ouspIMMax)]
-  im  <- updateIM (timeRemaining gp gs) False uwater (peIMap npers) $ attrs ++ hattrs
+  hPutStrLn stderr $ "Reseaux: " ++ show reseaux
+  im  <- updateIM (timeRemaining gp gs) False uwater (peIMap npers) $ attrs ++ hattrs ++ reseaux
   -- imo <- updateIM (timeRemaining gp gs) True  uwater (peIMapOur npers) oattrs
-  let fas = sortFreeAnts st1	-- the ones near important points first
-  stf <- execState (freeAnts im fas) st1	-- then the free ants
+  stf <- execState (freeAnts im (ours gs)) st1	-- then the free ants
   restTime <- timeRemaining gp gs
   let plans = M.fromList $ stPlans stf
       !fpers = (stPersist stf) { pePlMemo = plans, peIMap = im, -- peIMapOur = imo,
@@ -347,7 +353,7 @@ fightParams st fz@(us, themm) ho maj
           gp  = stPars st
           gs  = stState st
           c   = stOurCnt st
-          nhills = inRadius2 fst (homeRadius gp) u ho $ hills gs
+          nhills = inRadius2 fst (homeRadius gp) u ho $ stHills st
           (ohills, ehills) = partition ((==0) . snd) nhills
           reg' = min 60 $ c * c `div` 200	-- by 0 is 0, by 100 is 50, maximum is 100
           agr' = maj >= attMajority
@@ -379,70 +385,6 @@ markWait pt = do
     let busy = stBusy st
     liftIO $ writeArray busy pt True
     return True
-
--- Combine the strategies for the move generation
-(<|>) :: MyGame Bool -> MyGame Bool -> MyGame Bool
-m1 <|> m2 = m1 >>= \r -> if r then return r else m2
-
-infixr 1 <|> 
-
-{--
-perAnt :: Point -> MyGame Bool
-perAnt pt = do
-    svs <- getValidDirs pt
-    if not (fst svs) && null (snd svs)
-       then return True	-- it looks this one was already moved
-       else do
-           modify $ \s -> s { stCanStay = fst svs, stValDirs = snd svs }
-           getGoal pt
---}
-
-getGoal :: Point -> MyGame Bool
-getGoal pt =
-    oneChoice pt <|>	-- if we have only one choice, take it
-    immRaze pt <|>	-- if we can immediately raze a hill, do it
-    pickFood pt <|>	-- immediate food pick
-    followPlan pt <|>	-- follow a plan
-    razeAttac pt <|>	-- raze attack
-    smellBlood pt <|>	-- if there is some battle, go there
-    gotoFood pt <|>	-- find some food
-    rest pt		-- whatever...
-
--- When we have only one choice, take it
-oneChoice :: Point -> MyGame Bool
-oneChoice pt = do
-    st <- get
-    if stCanStay st
-       then if null $ stValDirs st
-               then markWait pt	-- we can only wait
-               else return False
-       else case stValDirs st of
-                [(d, _)] -> orderMove pt d "oneChoice"	-- the only possibility
-                _        -> return False
-
--- When we can raze some hill not defended: do it!
-immRaze :: Point -> MyGame Bool
-immRaze pt = do
-    mhr <- hillToRaze pt viewRadius
-    case mhr of
-        Nothing     -> return False
-        Just (h, x) -> do
-            st <- get
-            let bound = stUpper st
-                as = map snd $ ants $ stState st
-            if null $ inRadius2 id x bound h as
-               then gotoPoint False pt h
-               else return False
-
--- If we stay near a food square: wait one turn to pick it
-pickFood :: Point -> MyGame Bool
-pickFood pt = do
-  food <- gets $ food . stState
-  fs   <- foodPoints pt
-  let foods = getFoods food fs
-  if null foods
-     then return False
-     else canStay (deleteTargets foods >> replicatePlan pt) (return False)
 
 -- If we are very near to a food: try to pick it
 easyFood :: Point -> Int -> MyGame (Maybe (Point, [PathInfo]))
@@ -514,166 +456,6 @@ followPlan pt = do
                            ]
                     act
 
--- How to attack and raze an enemy hill
-razeAttac :: Point -> MyGame Bool
-razeAttac pt = do
-    mhr <- hillToRaze pt razeRadius
-    case mhr of
-        Nothing     -> return False
-        Just (h, x) -> do
-            st <- get
-            case lookup h (stWeakEH st) of
-                Nothing         -> return False
-                Just (us, them) -> do
-                    let weall = stOurCnt st
-                        (attac, retra) = attacProbs x us them weall
-                    -- debug $ "Attack from " ++ show pt ++ " to " ++ show h
-                    -- debug $ "- Params: "
-                    --         ++ concat (intersperse " / " (map show [x, us, them, weall]))
-                    -- debug $ "- Probs:  " ++ show attac ++ " <-> " ++ show retra
-                    -- Here we don't check for valid moves - is it ok?
-                    act <- choose [(attac, gotoPoint False pt h), (retra, return False)]
-                    act
-
--- If there is some battle, go there
-smellBlood :: Point -> MyGame Bool
-smellBlood pt = do
-  st <- get
-  let hots = stHotSpots st
-      deltat = stDeltat st
-      stats = stStatsAs st
-  if null hots
-     then return False
-     else do
-        let et = estimateTime stats maxSmellPath
-            ep = maxSmellPath
-        if et > deltat
-           then wanted "smellBlood" ep et deltat
-           else do
-              mth <- toNearest pt hots maxSmellPath
-              putLastAsParam maxSmellPath
-              case mth of
-                  Nothing          -> return False
-                  Just (ho, hpath) -> do
-                      let hplan = Plan { plPrio = Green, plTarget = ho,
-                                         plPath = plp, plPLen = sum (map piTimes plp),
-                                         plWait = maxPlanWait }
-                          plp = take stepsToBlood hpath
-                          gp  = stPars st
-                          gs  = stState st
-                          u   = stUpper st
-                          cnt = stOurCnt st
-                          nhills = inRadius2 fst (homeRadius gp) u ho $ hills gs
-                      -- when the hotspot is near some hill, do not delete it, so more ants are comming
-                      when (null nhills && cnt < cntLastAttack) $
-                           modify $ \s -> s { stHotSpots = delete ho hots }
-                      executePlan pt hplan
-
--- Go to some free food, in some radius
-gotoFood :: Point -> MyGame Bool
-gotoFood pt = do
-  st <- get
-  let frf = stFrFood st
-  if S.null frf
-     then return False
-     else do
-         let fo = S.toList frf
-         -- take the nearest food in some radius
-             u  = stUpper st
-             gp = stPars st
-             foods = takeWhile ((<= foodRadius gp) . snd) $ sortByDist id u pt fo
-         takeFirst (gotoPoint True pt) $ map fst foods
-
--- When boring:
-rest pt = do
-    act <- choose [(7, explore pt), (3, moveRandom pt)]
-    act
-
-moveToList :: Point -> [Point] -> MyGame Bool
-moveToList pt as = do
-    let gc = gravCenter as
-    moveTo True pt gc
-
-moveFromList :: Point -> [Point] -> MyGame Bool
-moveFromList pt as = do
-    let gc = gravCenter as
-    moveTo False pt gc
-
--- The enemy ants we have around us
-antsInZone :: Bool -> Point -> MyGame [Point]
-antsInZone friends pt = do
-    st <- get
-    let u = stUpper st
-        gs = stState st
-        as = if friends then ours gs else map snd $ ants gs
-        gp = stPars st
-    return $! inRadius2 id (dangerRadius gp) u pt as
-
-inHomeZone :: Point -> MyGame (Maybe Point)
-inHomeZone pt = do
-    st <- get
-    let u = stUpper st
-        gp = stPars st
-        gs = stState st
-        -- take my hills and sort them by distance
-        hs = sortByDist id u pt $ map fst $ filter ((== 0) . snd) $ hills gs
-    if null hs
-       then return Nothing
-       else do
-          let (h, x) = head hs
-          if x <= homeRadius gp
-             then return $ Just h
-             else return Nothing
-
--- Keep close to home
-stayNearHome :: Point -> Point -> [PathInfo] -> MyGame Bool
-stayNearHome pt h vs = if pt == h then moveRandom pt else moveTo True pt h
-
--- Move to or from a point if the direction not busy (else wait)
-moveTo :: Bool -> Point -> Point -> MyGame Bool
-moveTo towards pt to = do
-    st <- get
-    let u = stUpper st
-        (d, n) = if towards then nextTo u pt to else nextAw u pt to
-    b <- isBusy n
-    if b then markWait pt
-         else orderMove pt d "moveTo"
-
-{--
--- If we are more: attack!
-dangerAway :: Point -> [Point] -> [PathInfo] -> MyGame Bool
-dangerAway pt as vs = do
-    os <- antsInZone True pt
-    case length os of
-      1 -> dangerAlone pt as vs
-      _ -> attackManyToMany pt os as
-
--- We are alone against many: run!
-runAway :: Point -> [Point] -> MyGame Bool
-runAway pt as = moveFromList pt $ take 3 as
-
-attackIt = moveTo True
-
-attackOne pt _ = moveRandom pt
---}
-
-hillToRaze :: Point -> (GameParams -> Int) -> MyGame (Maybe (Point, Int))
-hillToRaze pt rf = do
-  st <- get
-  let gs = stState st
-      -- take the active enemy hills
-      hi = peEnHills $ stPersist st
-  if null hi
-     then return Nothing
-     else do
-         -- take the nearest hill
-         let u  = stUpper st
-             (h, x) = head $ sortByDist id u pt hi
-             gp = stPars st
-         if x > rf gp
-            then return Nothing	-- too far
-            else return $ Just (h, x)
-
 attacProbs :: Int -> Int -> Int -> Int -> (Int, Int)
 attacProbs x us them ours = (us * us * ours `div` afact, them * them * dfact `div` ours)
     where afact = 10 * x
@@ -698,13 +480,6 @@ replicatePlan pt = do
 
 newPlan :: Point -> Plan -> MyGame ()
 newPlan pt plan = modify $ \s -> s { stPlans = (pt, plan) : stPlans s }
-
--- Movement section
-takeFirst :: (Point -> MyGame Bool) -> [Point] -> MyGame Bool
-takeFirst _ []     = return False
-takeFirst f (p:ps) = do
-    r <- f p
-    if r then return r else takeFirst f ps
 
 -- Go to a point if there is no water in between
 gotoPoint :: Bool -> Point -> Point -> MyGame Bool
@@ -731,7 +506,6 @@ gotoPoint isFood pt to = do
                plan = Plan { plPrio = Green, plTarget = to, plPath = path,
                              plPLen = sum (map piTimes path), plWait = maxPlanWait }
            -- debug $ "Path: " ++ show path
-           -- when isFood $ modify $ \s -> s { stFrFood = S.delete to (stFrFood s) }
            executePlan pt plan
 
 -- Given a bitmap of "busy" points, and a source point, find
@@ -775,14 +549,6 @@ lrDirs :: Dir -> [Dir]
 lrDirs d = [dirdir succ d, dirdir pred d]
     where dirdir f = toEnum . (`mod` 4) . f . fromEnum
 
--- Given a point, give the neighbour points, where we could find food
--- We don't even check for water, as food will for sure not be there
-foodPoints :: Point -> MyGame [Point]
-foodPoints pt = do
-    st <- get
-    let u = stUpper st
-    return $ map (\d -> move u pt d) allDirs
-
 -- Gets the valid dirs to move (or stay), considering busy cells
 -- and ants with less liberty grades (because they are
 -- part of a fight zone)
@@ -803,28 +569,6 @@ getValidDirs pt = do
                   Go d -> edirToDirs bstay (d:acc) eds
                   _    -> edirToDirs bstay acc eds
 
--- Take a random (but not bad) direction
-moveRandom :: Point -> MyGame Bool
-moveRandom pt = do
-  vs <- gets stValDirs
-  case vs of
-    []  -> return False		-- should not come here
-    [(d, _)] -> orderMove pt d "random"
-    _   -> do
-      cst <- gets stCanStay
-      let low = if cst then -4 else 1
-      r <- liftIO $ randomRIO (low, length vs)
-      if r <= 0
-         then markWait pt	-- means: wait
-         else orderMove pt (fst $ vs !! (r - 1)) "random"
-
-maiRar :: Point -> MyGame Bool
-maiRar pt = do
-    os <- antsInZone True pt
-    if null os
-       then return False
-       else moveFromList pt os
-
 explore :: Point -> MyGame Bool
 explore pt = do
   vs <- gets stValDirs
@@ -844,15 +588,6 @@ explore pt = do
                   wa <- isWater n
                   se <- return False	-- seenPoint n
                   if wa || se then go u (i-1) else gotoPoint False pt n
-
-sortFreeAnts :: MyState -> [Point]
-sortFreeAnts st
-    | null ips  = oa
-    | otherwise = map fst $ sortBy (comparing snd) $ map (\p -> (p, lisd p)) oa
-    where ips    = map fst (stWeakEH st) ++ stHotSpots st
-          oa = ours $ stState st
-          lisd p = minimum $ map (distance u p) ips
-          u      = stUpper st
 
 -- The list cannot be null!
 choose :: [(Int, a)] -> MyGame a
@@ -917,18 +652,46 @@ stepMultPath pi pis
         let p = move u (piPoint pi) (piDir pi)
         return $ pi { piPoint = p, piTimes = piTimes pi - 1 } : pis
 
-deleteTargets :: [Point] -> MyGame ()
-deleteTargets foods = do
-    st <- get
-    let food   = stFrFood st
-        food'  = foldr S.delete food foods
-        pers   = stPersist st
-        plans  = pePlMemo pers
-        plans' = M.filter ((`elem` foods) . plTarget) plans
-    put st { stFrFood = food', stPersist = pers { pePlMemo = plans' }}
-
 putLastAsParam :: Int -> MyGame ()
 putLastAsParam x = modify $ \s -> s { stCParam = x }
+
+aliveHills :: Point -> Int -> [(Point, Int)] -> [(Point, Int)] -> [Point] -> [(Point, Int)]
+aliveHills bound vr2 hinow himem myants
+    = -- trace (
+      --       "Trace aliveHills:\n" ++ "bound=" ++ show bound ++ ", vr2=" ++ show vr2
+      --       ++ ", hinow=" ++ show hinow ++ ", himem=" ++ show himem
+      --       ++ ", myants=" ++ show myants ++ "\nnotseen=" ++ show notseen
+      --   )
+        hinow ++ filter inviz notseen
+    where notseen = himem \\ hinow	-- remembered but not seen now
+          inviz (h, _) = null $ inRadius2 id vr2 bound h myants
+
+aliveFood :: Point -> Int -> [Point] -> [Point] -> [Point] -> [Point]
+aliveFood bound vr2 fnow fmem myants = fnow ++ filter inviz notseen
+    where notseen = fmem \\ fnow
+          inviz p = null $ inRadius2 id vr2 bound p myants
+
+fishNet :: Point -> Int -> [Point] -> [Point] -> [([Point], Int)]
+fishNet _ _  [] _ = []
+fishNet u v2 hs as
+    | r < 2 * vr = []
+    | otherwise  = trace ("Trace fishNet:\n" ++ "apn=" ++ show apn ++ ", r=" ++ show r
+                       ++ ", np = " ++ show np
+                     )
+                     map circumvent hs
+    where n   = fromIntegral (length hs) :: Double
+          v'  = fromIntegral v2
+          vr  = sqrt v'
+          apn = fromIntegral (length as) / n
+          -- r = -pi * v' + vr * sqrt (pi * pi * v' + apn)
+          r = max (2 * vr) $ apn / 10	-- approximate
+          ptpa = 3
+          np = ceiling $ 2 * pi * r / ptpa
+          pts h = [ sumPoint u h (cirp t) | t <- [0..np-1]]
+          cco = 2 * pi / fromIntegral np
+          cirp t = let t' = fromIntegral t * cco
+                   in (ceiling $ r * sin t', ceiling $ r * cos t')
+          circumvent h = (pts h, circIMMax)
 
 wanted :: String -> Int -> Int -> Int -> MyGame Bool
 wanted what ep et deltat = return False

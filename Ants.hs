@@ -293,7 +293,9 @@ gameLoop mendt gp gs doTurn = do
           let ws = B.words line
               tn = fst . fromJust $ B.readInt $ head $ tail ws
               run = do
-                  gs1 <- updateGame gp gs { turnno = tn }
+                  let gs0 = gs { waterP = [], ants = [], ours = [], food = S.empty,
+                                 foodP = [], hills = [], turnno = tn }
+                  gs1 <- updateGame gp gs0
                   (orders, gs2) <- doTurn gp gs1
                   mapM_ issueOrder orders
                   finishTurn tn gp

@@ -3,7 +3,7 @@ Play		= J:/Python27/python.exe $(Root)/playgame.py
 LogDir	= game_logs
 Turns		= 1000
 Maps		= maps
-Pars		= --turntime=500 --end_wait=0.5 --verbose --log_error
+Pars		= --turntime=500 --end_wait=0.5 --verbose --log_input --log_error
 Engine	= $(Root)/source/MyBot.exe
 Engines	= [
 	Greedy = python $(Root)/sample_bots/python/GreedyBot.py
@@ -15,4 +15,5 @@ Engines	= [
 	MyBot11   = $(Root)/source/MyBot-v11.exe
 	MyBot14   = $(Root)/source/MyBot-v14.exe
 	MyBot15   = $(Root)/source/MyBot-v15.exe
+	MyBotC    = $(Root)/source/MyBotC.exe
     ]
