@@ -5,7 +5,8 @@ module Fight
       EDir(..),
       EvalPars(..),
       fightZones,
-      nextTurn
+      nextTurn,
+      zoneMax, zoneMaxMax, zoneMaxUs
       )
 where
 
@@ -20,6 +21,12 @@ import Ants
 
 -- mytrace = trace
 mytrace _ x = x
+
+-- Some constants
+zoneMax      = 8  :: Int	-- max ants in a zone fight for full calculation
+zoneMaxMax   = 10 :: Int	-- max ants in a zone fight
+zoneMaxUs    = 3  :: Int	-- max of our ants in a bigger zone fight
+zoneMaxUsClc = 5  :: Int	-- max of our ants for which we do full calculation
 
 data EDir = Any [EDir] | Stay | Go Dir deriving (Eq, Show)	-- extended direction, as we can also choose to wait
 type Action = (Point, EDir)		-- start point and direction to move
@@ -55,7 +62,11 @@ nextTurn dist dist1 gfun epar us toMove = mytrace ("our moves: " ++ show (cf:cfs
 ourMoves :: Int -> Int -> GenFun -> EvalPars -> [Point] -> ToMove -> [(FPoint, Config)]
 ourMoves dist dist1 gfun epar us toMove = do
     let amvs = sortBy (comparing (fst . snd)) $ map (interMove near' near1 gfun epar 0 toMove M.empty) us
-    myc <- nextAnt True near' near1 gfun epar 0 amvs toMove ([], M.empty)
+        ourlen = length us
+        reduce = if ourlen > zoneMaxUsClc then 2 ^ (ourlen - zoneMaxUsClc) else 1
+        mycfs = nextAnt True near' near1 gfun epar 0 amvs toMove ([], M.empty)
+        consider = length mycfs `div` reduce
+    myc <- take consider $ sortConfigs mycfs
     let ocfs = nextPlayer near' near1 gfun epar toMove myc
         ooc  = gravCenter us
         oec  = gravCenter $ enemiesOfPlayer 0 toMove
@@ -251,3 +262,27 @@ average pes opt xs = go (0, 0, maxmax, -maxmax, 0) xs
 near r u a b = euclidSquare u a b <= r
 
 enemiesOfPlayer pla toMove = concatMap snd $ filter ((/= pla) . fst) $ M.assocs toMove
+
+-- Some configurations are more resilient than other
+sigma :: [Point] -> (Double, Double)
+sigma ps = (sigx, sigy)
+    where sumx = sum $ map (fromIntegral . fst) ps
+          sumy = sum $ map (fromIntegral . snd) ps
+          sigx = sum $ map (f sumx . fst) ps
+          sigy = sum $ map (f sumy . snd) ps
+          f c x = let d = c - fromIntegral x in d * d
+
+-- (0, sy), (sx, 0) and (s, s) are best -- these are horizontal, vertical or diagonal lines
+-- So one configuration is better if it's near of of those
+-- Smaller note is better
+note :: (Double, Double) -> Double
+note (x, y) = min (abs (x - y)) $ min x y
+
+-- Sort configs as described above
+sortConfigs :: [Config] -> [Config]
+sortConfigs = undecorate . sortBy (comparing snd) . decorate (note . sigma . M.keys . snd)
+
+decorate :: (a -> b) -> [a] -> [(a, b)]
+decorate f = map (\a -> (a, f a))
+
+undecorate = map fst

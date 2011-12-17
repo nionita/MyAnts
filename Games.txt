@@ -3,17 +3,16 @@ Play		= J:/Python27/python.exe $(Root)/playgame.py
 LogDir	= game_logs
 Turns		= 1000
 Maps		= maps
-Pars		= --turntime=500 --end_wait=0.5 --verbose --log_input --log_error
-Engine	= $(Root)/source/MyBot.exe
+Pars		= --turntime=500 --viewradius2=77 --end_wait=0.5 --verbose --log_input --log_error
+Engine	= MyBot
+Challenger	= MyBot17
 Engines	= [
-	Greedy = python $(Root)/sample_bots/python/GreedyBot.py
-	Hunter = python $(Root)/sample_bots/python/HunterBot.py
-	MyBot40   = $(Root)/source/MyBot40.exe
-	MyBotv6   = $(Root)/source/MyBot-v6.exe
 	MyBotv9   = $(Root)/source/MyBot-v9.exe
 	MyBot10   = $(Root)/source/MyBot-v10.exe
 	MyBot11   = $(Root)/source/MyBot-v11.exe
 	MyBot14   = $(Root)/source/MyBot-v14.exe
 	MyBot15   = $(Root)/source/MyBot-v15.exe
 	MyBotC    = $(Root)/source/MyBotC.exe
+	MyBot17   = $(Root)/source/MyBot-v17.exe
+	MyBot     = $(Root)/source/MyBot.exe
     ]

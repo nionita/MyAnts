@@ -10,7 +10,7 @@ import Data.Array.Base (unsafeRead, unsafeAt)
 import Data.Array.Unboxed
 import Data.Array.IO
 import Data.List
-import Data.Ord (comparing)
+import Data.Ord
 import qualified Data.Map as M
 import Data.Maybe (fromJust, catMaybes)
 import Data.Ord (comparing)
@@ -56,7 +56,7 @@ data Persist = Persist {
          peStatsFi :: !Stats,	-- time statistics for fight
          peStatsAs :: !Stats,	-- time statistics for aStar
          peIMap    :: !InfMap,	-- general influence map
-         peRndAttr :: [Point]	-- random attractors in unseen regions
+         peRndAttr :: [(Point, Int)]	-- random attractors in unseen regions
      }
 
 type MyGame a = forall r. CPS r MyState IO a
@@ -82,11 +82,11 @@ msDecrAst = 300		-- under this time we decrese the AStar searches per turn
 msIncrAst = 450		-- over this time we increse the AStar searches per turn
 maxMaxASt = 60		-- maximum AStar searches per turn
 maxJumps  = 20		-- maximum jump length for jump point search
-attMajority = 1		-- used when attacking (beeing more aggresive)
-hotMajority = 2		-- used when creating hot spots
+minAgrWhenEqual = 20	-- minimum of our ants to be aggresive when equal fight
+attMajority = 0		-- used when attacking (beeing more aggresive)
+hotMajority = 3		-- used when creating hot spots
 maxPlanWait = 5		-- how long to wait in a plan when path is blocked
 checkEasyFood = 10	-- how often to check for easy food?
-zoneMax      = 8	-- max ants in a zone fight
 maxSmellPath = 50	-- max steps for smell blood paths
 cntLastAttack = 200	-- when we are so many, go to last attack
 stepsToBlood = 15	-- afterwhich we reconsider
@@ -111,9 +111,7 @@ radNetDensity = 3	-- density of ants on the defence radius (ants / visibility)
 circIMMax = 100		-- maximum influence on the home circumference
 maxAttrsTries = 5	-- maximum tries to put new attractors
 maxAttrsAtOnce = 1	-- maximum new random attractors per turn
-
-exploreFact :: Int
-exploreFact = 10
+timeToLive    = 50	-- how many turns random attractors live
 
 doTurn :: GameParams -> GameState Persist -> IO ([Order], GameState Persist)
 doTurn gp gs = do
@@ -125,7 +123,7 @@ doTurn gp gs = do
                -- Just pers -> return $ cleanDeadPlans gs pers	-- is it necessary?
                Just pers -> return pers
                Nothing   -> do
-                   let vs = sqrt $ fromIntegral $ viewradius2 gp
+                   let vs = 0.5 * sqrt (fromIntegral $ viewradius2 gp)
                    let sb = (pointToSeen (fst b) vs, pointToSeen upper vs)
                    nseen <- newArray sb False
                    let empIM = listArray b $ repeat 0
@@ -138,11 +136,6 @@ doTurn gp gs = do
       (hio', hinow') = partition ((== 0) . snd) hAlive
       hio = map fst hio'
       hi  = map fst hinow'
-  -- hPutStrLn stderr $ "Alive hills: " ++ show hAlive
-  -- take only the active ones (actually not razed by us)
-  -- hi <- filterM (liftM not . readArray (peSeen npers)) $ nub $ hinow ++ peHills npers
-  -- restTime0 <- timeRemaining gp gs
-  let -- tfood = S.fromList $ map plTarget $ M.elems (pePlMemo npers)	-- plan targets
       !st0 = MyState {
                    stPars = gp, stState = gs, stBusy = busy,
                    stPersist = npers { peHills = hAlive }, stUpper = upper,
@@ -154,6 +147,7 @@ doTurn gp gs = do
                    stCanStay = True, stValDirs = [], stCParam = 0,
                    stStatsFi = peStatsFi npers, stStatsAs = peStatsAs npers, stDeltat = 0
                }
+      -- zoneRadius1 = hellSteps (attackradius2 gp) 1
       zoneRadius2 = hellSteps (attackradius2 gp) 2
       fzs = fightZones upper zoneRadius2 (ours gs) (ants gs) []
   -- when (not $ null fzs) $ hPutStrLn stderr $ "Fight zones:\n" ++ show fzs
@@ -175,11 +169,12 @@ doTurn gp gs = do
                (enants, enanIMMax),		-- enemy ants near our home
                (hi, enhi),			-- enemy hills
                (stHotSpots st1, hotsIMMax),	-- hotspots
-               (randatn, rndmIMMax)]		-- random spots
+               (map fst randatn, rndmIMMax)]		-- random spots
       oattrs = [(ours gs, ouspIMMax)]
   -- hPutStrLn stderr $ "Rnd.Attractors: " ++ show randatn
   -- im  <- updateIM (timeRemaining gp gs) False uwater (peIMap npers) $ attrs ++ hattrs ++ reseaux
   im  <- updateIM (timeRemaining gp gs) False uwater (peIMap npers) $ attrs ++ hattrs
+  let sours = sortAnts st1 (ours gs)
   stf <- execState (freeAnts im (ours gs)) st1	-- then the free ants
   restTime <- timeRemaining gp gs
   let plans = M.fromList $ stPlans stf
@@ -222,6 +217,14 @@ homeDefenders gp u cnt os as pt = (pt, v, aa)
           c  = cnt * homeDefProc `div` 100
           v  = max 0 $ (c + a - d) * homeDefRate
 
+-- Sort the ants by liberty grads -- less comes before
+sortAnts :: MyState -> [Point] -> [Point]
+sortAnts st = map fst . sortBy (comparing snd) . map (libs (stLibGrad st))
+    where libs grds p = case M.lookup p grds of
+                          Nothing -> (p, 5)	-- this is completely free
+                          Just [] -> (p, 10)	-- this is involved in fight (already moved)
+                          Just fr -> (p, length fr)	-- this is limited
+
 -- Orders for the free ants (i.e. not fighting)
 -- freeAnts :: InfMap -> [Point] -> MyGame ()
 freeAnts foim = mapM_ (perAnt foim)
@@ -239,15 +242,6 @@ perAnt foim pt = do
                    (v:vs) = map fst infs
                    -- alle = all (== v) vs
                followInfMap pt infs
-{--
-               if alle
-                  then do
-                      ex <- lift $ randomRIO (0, exploreFact)
-                      if ex == 0
-                         then explore pt >> return ()
-                         else followInfMap pt infs
-                  else followInfMap pt infs
---}
     where inf (d, p) = (foim!p, d)
 
 followInfMap pt infs = do
@@ -260,26 +254,6 @@ followInfMap pt infs = do
           -- and multiply with another factor to get an entry for choose
           -- sqrm m (s, d) = let s1 = s - m in (s1*s1, d)
           sqrm m (s, d) = let s1 = s - m in (s1, d)
-
-{--
-freeAnts [] = return ()
-freeAnts points = do
-  st <- get
-  let gp = stPars  st
-      gs = stState st
-  tr <- lift $ timeRemaining gp gs
-  let lt = stTimeRem st
-      lp = stCParam st
-      fis = addParVal (stStatsAs st) lp (lt - tr)
-  modify $ \s -> s { stTimeRem = tr }
-  when (lp > 0) $ modify $ \s -> s { stStatsAs = fis, stCParam = 0 }
-  let deltat = tr - msReserve
-  when (deltat > 0) $ do
-      modify $ \s -> s { stDeltat = deltat }
-      perAnt $ head points
-      return ()
-  freeAnts $ tail points
---}
 
 updateIM :: IO Int -> Bool -> RBitMap -> InfMap -> [([Point], Int)] -> IO InfMap
 updateIM trio once rbm im phs = go $ amap decay im // asc
@@ -303,6 +277,10 @@ myFreeAnts os osf = S.toList $ S.fromList os `S.difference` S.fromList osf
 hellSteps :: Int -> Int -> Int
 hellSteps ar x = ar + x*x + ceiling (2 * fromIntegral x * sqrt (fromIntegral ar))
 
+-- To select the fight zones (only the small ones can be calculated) we need an
+-- intermediate data structure
+data FZoneV = FZoneV { fzTotal, fzUs, fzThem :: !Int }
+
 -- Orders for the fighting ants
 fightAnts fs
     | null fs'  = return ()
@@ -315,9 +293,14 @@ fightAnts fs
             r0  = attackradius2 gp
         tr <- lift $ timeRemaining gp gs
         go r0 r1 tr fs'
-    where fs' = map fst $ sortBy (comparing snd)
-                        $ filter ((>= -zoneMax) . snd)
-                        $ map (\fz@(ps, tm) -> (fz, - (length ps + points tm))) fs
+    where fs' = map fst $ reverse $ sortBy (comparing $ fzTotal . snd)
+                        $ filter (fzAccept . snd)
+                        $ map fzVol fs
+          fzVol fz@(ps, tm) = let lps = length ps
+                                  ptm = points tm
+                              in (fz, FZoneV { fzTotal = lps + ptm, fzUs = lps, fzThem = ptm })
+          fzAccept fzv =  fzTotal fzv <= zoneMax
+                       || fzTotal fzv <= zoneMaxMax && fzUs fzv <= zoneMaxUs
           go _ _ _   [] = return ()
           go a b tr0 (fz@(us, tm):fzs) = do
              st <- get
@@ -329,15 +312,18 @@ fightAnts fs
                  sf  = stStatsFi st
                  tn  = estimateTime sf lp
              -- debug $ "Remaining: " ++ show tr0 ++ ", estimate time: " ++ show tn
-             when (deltat >= tn) $ do
-                 perFightZone a b fz maj
-                 let gp = stPars st
-                     gs = stState st
-                 tr <- lift $ timeRemaining gp gs
-                 let fis = addParVal sf lp (tr0 - tr)
-                 -- debug $ "Actually: " ++ show (tr0 - tr)
-                 modify $ \s -> s { stStatsFi = fis }
-                 go a b tr fzs
+             tr' <- if (deltat < tn)
+                       then return tr0
+                       else do
+                         perFightZone a b fz maj
+                         let gp = stPars st
+                             gs = stState st
+                         tr <- lift $ timeRemaining gp gs
+                         let fis = addParVal sf lp (tr0 - tr)
+                         -- debug $ "Actually: " ++ show (tr0 - tr)
+                         modify $ \s -> s { stStatsFi = fis }
+                         return tr
+             go a b tr' fzs
 
 perFightZone r0 r1 fz@(us, themm) maj = do
     ho <- makeHotSpot fz maj
@@ -352,8 +338,9 @@ perFightZone r0 r1 fz@(us, themm) maj = do
         (sco, cfs) = nextTurn r0 r1 (valDirs ibusy u) epar us themm
         oac = fst cfs
     -- debug $ "Fight zone: us = " ++ show us ++ ", them = " ++ show themm
-    -- debug $ "Params: " ++ show epar ++ " score = " ++ show sco ++ "\nOur moves: " ++ show oac
-    mapM_ extOrderMove oac
+    let oacs = sortBy orderOrd oac
+    -- debug $ "Params: " ++ show epar ++ " score = " ++ show sco ++ "\nOur moves: " ++ show oacs
+    mapM_ extOrderMove oacs
     where valDirs :: UArray Point Bool -> Point -> Point -> [(Dir, Point)]
           valDirs w u pt = filter (not . (w!) . snd) $ map (\d -> (d, move u pt d)) allDirs
 
@@ -369,8 +356,8 @@ fightParams st fz@(us, themm) ho maj
           nhills = inRadius2 fst (homeRadius gp) u ho $ stHills st
           (ohills, ehills) = partition ((==0) . snd) nhills
           reg' = min 60 $ c * c `div` 200	-- by 0 is 0, by 100 is 50, maximum is 100
-          agr' = maj >= attMajority
-          pes' = if null nhills then 75 else 90
+          agr' = maj >= attMajority && c > minAgrWhenEqual || maj > attMajority
+          pes' = 100	-- if null nhills then 75 else 90
           (tgt', tgs') | null ohills && null ehills = (Nothing, (0, 0))
                        | null ohills = (Just $ fst $ head ehills, (100, 0))
                        | otherwise   = (Just $ fst $ head ohills, (0, -100))
@@ -381,6 +368,11 @@ extOrderMove (pt, edir) = do
         Go d   -> orderMove pt d "fight" >> libGrad pt []
         Stay   -> markWait pt >> libGrad pt []
         Any ms -> libGrad pt ms
+
+orderOrd :: (Point, EDir) -> (Point, EDir) ->  Ordering
+orderOrd (_, Any _) _          = GT
+orderOrd _          (_, Any _) = LT
+orderOrd _          _          = EQ
 
 libGrad :: Point -> [EDir] -> MyGame ()
 libGrad p es = modify $ \s -> s { stLibGrad = M.insert p es (stLibGrad s) }
@@ -582,26 +574,6 @@ getValidDirs pt = do
                   Go d -> edirToDirs bstay (d:acc) eds
                   _    -> edirToDirs bstay acc eds
 
-explore :: Point -> MyGame Bool
-explore pt = do
-  vs <- gets stValDirs
-  bound  <- gets stUpper
-  case vs of
-    []       -> return False		-- should not come here
-    [(d, _)] -> orderMove pt d "explore"
-    _        -> go bound 3	-- try 3 times
-    where go u 0 = return False
-          go u i = do
-             rx <- liftIO $ randomRIO (-30, 30)
-             ry <- liftIO $ randomRIO (-30, 30)
-             let n = sumPoint u pt (rx, ry)
-             if distance u pt n <= 7	-- not too near
-                then go u i
-                else do
-                  wa <- isWater n
-                  se <- return False	-- seenPoint n
-                  if wa || se then go u (i-1) else gotoPoint False pt n
-
 -- The list cannot be null!
 choose :: [(Int, a)] -> MyGame a
 choose ias = do
@@ -669,13 +641,7 @@ putLastAsParam :: Int -> MyGame ()
 putLastAsParam x = modify $ \s -> s { stCParam = x }
 
 aliveHills :: Point -> Int -> [(Point, Int)] -> [(Point, Int)] -> [Point] -> [(Point, Int)]
-aliveHills bound vr2 hinow himem myants
-    = -- trace (
-      --       "Trace aliveHills:\n" ++ "bound=" ++ show bound ++ ", vr2=" ++ show vr2
-      --       ++ ", hinow=" ++ show hinow ++ ", himem=" ++ show himem
-      --       ++ ", myants=" ++ show myants ++ "\nnotseen=" ++ show notseen
-      --   )
-        hinow ++ filter inviz notseen
+aliveHills bound vr2 hinow himem myants = hinow ++ filter inviz notseen
     where notseen = himem \\ hinow	-- remembered but not seen now
           inviz (h, _) = null $ inRadius2 id vr2 bound h myants
 
@@ -708,7 +674,7 @@ fishNet u v2 hs as turn
 
 -- Try to set (at most) maxAttrsAtOnce attractors in unseen regions
 -- by maxAttrsTries tries
-randomAttractors :: Point -> Double -> BitMap -> [Point] -> IO [Point]
+randomAttractors :: Point -> Double -> BitMap -> [Point] -> IO [(Point, Int)]
 randomAttractors u v bm fo = go maxAttrsTries maxAttrsAtOnce []
     where mx = fst u - 1
           my = snd u - 1
@@ -719,7 +685,7 @@ randomAttractors u v bm fo = go maxAttrsTries maxAttrsAtOnce []
              ry <- randomRIO (0, my)
              let rp = pointToSeen (rx, ry) v
              se <- readArray bm rp
-             if se then go (try-1) k acc else go (try-1) (k-1) ((rx, ry):acc)
+             if se then go (try-1) k acc else go (try-1) (k-1) (((rx, ry), timeToLive):acc)
 
 wanted :: String -> Int -> Int -> Int -> MyGame Bool
 wanted what ep et deltat = return False
@@ -736,12 +702,11 @@ initBusy gs = do
     -- forM_ (foodP gs) $ \p -> writeArray busy p True
     return busy
 
--- seenPoint = isBitMap (peSeen . stPersist)
-
-updateSeen :: GameState Persist -> BitMap -> Double -> [Point] -> IO [Point]
+updateSeen :: GameState Persist -> BitMap -> Double -> [(Point, Int)] -> IO [(Point, Int)]
 updateSeen gs seen vs ras = do
     forM_ (ours gs) $ \p -> writeArray seen (pointToSeen p vs) True
-    filterM (\p -> not <$> readArray seen (pointToSeen p vs)) ras
+    let ras' = map (\(p, t) -> (p, t-1)) $ filter ((>1) . snd) ras
+    filterM (\(p, _) -> not <$> readArray seen (pointToSeen p vs)) ras'
 
 realToSeen :: Int -> Double -> Int
 realToSeen x v = ceiling $ fromIntegral x / v + 0.5 
