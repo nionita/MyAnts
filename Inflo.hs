@@ -49,13 +49,14 @@ data MyState = MyState {
      }
 
 data Persist = Persist {
-         peSeen    :: !BitMap,	-- fields where we were
+         peSeen    :: !BitMap,	-- fields where we were (reduced by visibility radius)
          pePlMemo  :: !PlanMemo,	-- our plans
          peHills   :: [(Point, Int)],	-- hills we remember (not known to be razed)
+         peVisi    :: Double,	-- visibility radius
          peStatsFi :: !Stats,	-- time statistics for fight
          peStatsAs :: !Stats,	-- time statistics for aStar
          peIMap    :: !InfMap,	-- general influence map
-         peIMapOur :: !InfMap	-- influence map for our ants (against crowd)
+         peRndAttr :: [Point]	-- random attractors in unseen regions
      }
 
 type MyGame a = forall r. CPS r MyState IO a
@@ -97,16 +98,19 @@ razeRadius   =        const 1900	-- in which we consider to raze enemy hills
 dangerRadius = (1*) . attackradius2	-- in which we are in danger
 foodIMMax = 1000	-- maximum influence for food
 enhiIMMax0 = 2000	-- influence for enemy hill: constant factor
-enhiIMMax1 = 100	-- influence for enemy hill: linear factor (* our ants)
+enhiIMMax1 =  10	-- influence for enemy hill: linear factor (* our ants)
 hotsIMMax =  500	-- maximum influence for hot spots
 enanIMMax =  800	-- maximum influence for enemy ants in home zone
 ouspIMMax =  900	-- maximum influence for our ants (negative influence)
-homeDefProc = 5		-- percent of our ants which should defend
-homeDefRate = 30	-- increase per missing ant for home defend
+rndmIMMax = 1000	-- maximum influence for random spots
+homeDefProc = 10	-- percent of our ants which should defend
+homeDefRate = 100	-- increase per missing ant for home defend
 timeIMDec = 20		-- time decay for food in percent (remaining)
 spaceIMDec = 90		-- space decay for all in percent (remaining)
 radNetDensity = 3	-- density of ants on the defence radius (ants / visibility)
 circIMMax = 100		-- maximum influence on the home circumference
+maxAttrsTries = 5	-- maximum tries to put new attractors
+maxAttrsAtOnce = 1	-- maximum new random attractors per turn
 
 exploreFact :: Int
 exploreFact = 10
@@ -121,12 +125,14 @@ doTurn gp gs = do
                -- Just pers -> return $ cleanDeadPlans gs pers	-- is it necessary?
                Just pers -> return pers
                Nothing   -> do
-                   nseen <- newArray b False
+                   let vs = sqrt $ fromIntegral $ viewradius2 gp
+                   let sb = (pointToSeen (fst b) vs, pointToSeen upper vs)
+                   nseen <- newArray sb False
                    let empIM = listArray b $ repeat 0
                    return $ Persist { peSeen = nseen, pePlMemo = M.empty, peHills = [],
-                                      peIMap = empIM, peIMapOur = empIM,
+                                      peIMap = empIM, peRndAttr = [], peVisi = vs,
                                       peStatsFi = newStats 1 25, peStatsAs = newStats 10 25 }
-  updateSeen gs (peSeen npers)
+  remra <- updateSeen gs (peSeen npers) (peVisi npers) (peRndAttr npers)
   -- these are enemy hills we see this turn
   let hAlive = aliveHills upper (viewRadius gp) (hills gs) (peHills npers) (ours gs)
       (hio', hinow') = partition ((== 0) . snd) hAlive
@@ -154,10 +160,13 @@ doTurn gp gs = do
   st1 <- execState (fightAnts fzs) st0	-- first the fighting ants
   restTime <- timeRemaining gp gs
   hPutStrLn stderr $ "Time remaining (ms) after fight: " ++ show restTime
+  -- some random attractors in the unseen zone when not enough food
+  randat <- randomAttractors upper (peVisi npers) (peSeen npers) (foodP gs)
   uwater <- unsafeFreeze (water gs)
   let as = map snd $ ants gs
+      randatn = randat ++ remra	-- random attractors - remaining & new ones
       -- set a net of attractors around our homes
-      reseaux = fishNet upper (viewRadius gp) hio (ours gs)
+      reseaux = fishNet upper (viewRadius gp) hio (ours gs) (turnno gs)
       -- collect all our homes with deficit in defence and the attacking enemy ants
       (hattrs, enants) = foldl collect ([], [])
                              $ map (homeDefenders gp upper (stOurCnt st1) (ours gs) as) hio
@@ -165,15 +174,16 @@ doTurn gp gs = do
       attrs = [(foodP gs, foodIMMax),		-- food
                (enants, enanIMMax),		-- enemy ants near our home
                (hi, enhi),			-- enemy hills
-               (stHotSpots st1, hotsIMMax)]	-- hotspots
+               (stHotSpots st1, hotsIMMax),	-- hotspots
+               (randatn, rndmIMMax)]		-- random spots
       oattrs = [(ours gs, ouspIMMax)]
-  hPutStrLn stderr $ "Reseaux: " ++ show reseaux
-  im  <- updateIM (timeRemaining gp gs) False uwater (peIMap npers) $ attrs ++ hattrs ++ reseaux
-  -- imo <- updateIM (timeRemaining gp gs) True  uwater (peIMapOur npers) oattrs
+  -- hPutStrLn stderr $ "Rnd.Attractors: " ++ show randatn
+  -- im  <- updateIM (timeRemaining gp gs) False uwater (peIMap npers) $ attrs ++ hattrs ++ reseaux
+  im  <- updateIM (timeRemaining gp gs) False uwater (peIMap npers) $ attrs ++ hattrs
   stf <- execState (freeAnts im (ours gs)) st1	-- then the free ants
   restTime <- timeRemaining gp gs
   let plans = M.fromList $ stPlans stf
-      !fpers = (stPersist stf) { pePlMemo = plans, peIMap = im, -- peIMapOur = imo,
+      !fpers = (stPersist stf) { pePlMemo = plans, peIMap = im, peRndAttr = randatn,
                                  peStatsFi = stStatsFi stf, peStatsAs = stStatsAs stf }
       orders = stOrders stf
   hPutStrLn stderr $ "Time remaining (ms): " ++ show restTime
@@ -183,8 +193,8 @@ doTurn gp gs = do
   when (tn `mod` 100 == 0) $ do
     hPutStrLn stderr "Statistics for fight:"
     hPutStrLn stderr $ showStats (stStatsFi stf)
-    hPutStrLn stderr "Statistics for AStar:"
-    hPutStrLn stderr $ showStats (stStatsAs stf)
+    -- hPutStrLn stderr "Statistics for AStar:"
+    -- hPutStrLn stderr $ showStats (stStatsAs stf)
   return (orders, gsf)
 
 -- Attacs and defences of enemy hills: how many ants of us and of them are there?
@@ -227,7 +237,9 @@ perAnt foim pt = do
            when (not hasPlan) $ do
                let infs = map inf dps
                    (v:vs) = map fst infs
-                   alle = all (== v) vs
+                   -- alle = all (== v) vs
+               followInfMap pt infs
+{--
                if alle
                   then do
                       ex <- lift $ randomRIO (0, exploreFact)
@@ -235,6 +247,7 @@ perAnt foim pt = do
                          then explore pt >> return ()
                          else followInfMap pt infs
                   else followInfMap pt infs
+--}
     where inf (d, p) = (foim!p, d)
 
 followInfMap pt infs = do
@@ -671,14 +684,13 @@ aliveFood bound vr2 fnow fmem myants = fnow ++ filter inviz notseen
     where notseen = fmem \\ fnow
           inviz p = null $ inRadius2 id vr2 bound p myants
 
-fishNet :: Point -> Int -> [Point] -> [Point] -> [([Point], Int)]
-fishNet _ _  [] _ = []
-fishNet u v2 hs as
-    | r < 2 * vr = []
-    | otherwise  = trace ("Trace fishNet:\n" ++ "apn=" ++ show apn ++ ", r=" ++ show r
+fishNet :: Point -> Int -> [Point] -> [Point] -> Int -> [([Point], Int)]
+fishNet _ _  [] _  _    = []
+fishNet u v2 hs as turn
+    = trace ("Trace fishNet:\n" ++ "apn=" ++ show apn ++ ", r=" ++ show r
                        ++ ", np = " ++ show np
-                     )
-                     map circumvent hs
+            )
+            map circumvent hs
     where n   = fromIntegral (length hs) :: Double
           v'  = fromIntegral v2
           vr  = sqrt v'
@@ -687,11 +699,27 @@ fishNet u v2 hs as
           r = max (2 * vr) $ apn / 10	-- approximate
           ptpa = 3
           np = ceiling $ 2 * pi * r / ptpa
-          pts h = [ sumPoint u h (cirp t) | t <- [0..np-1]]
+          sel = turn `mod` np
+          pts h = [ sumPoint u h (cirp t) | x <- [1..3], let t = x * sel]
           cco = 2 * pi / fromIntegral np
           cirp t = let t' = fromIntegral t * cco
                    in (ceiling $ r * sin t', ceiling $ r * cos t')
           circumvent h = (pts h, circIMMax)
+
+-- Try to set (at most) maxAttrsAtOnce attractors in unseen regions
+-- by maxAttrsTries tries
+randomAttractors :: Point -> Double -> BitMap -> [Point] -> IO [Point]
+randomAttractors u v bm fo = go maxAttrsTries maxAttrsAtOnce []
+    where mx = fst u - 1
+          my = snd u - 1
+          go _ 0 acc = return acc
+          go 0 _ acc = return acc
+          go try k acc = do
+             rx <- randomRIO (0, mx)
+             ry <- randomRIO (0, my)
+             let rp = pointToSeen (rx, ry) v
+             se <- readArray bm rp
+             if se then go (try-1) k acc else go (try-1) (k-1) ((rx, ry):acc)
 
 wanted :: String -> Int -> Int -> Int -> MyGame Bool
 wanted what ep et deltat = return False
@@ -708,8 +736,18 @@ initBusy gs = do
     -- forM_ (foodP gs) $ \p -> writeArray busy p True
     return busy
 
-updateSeen :: GameState Persist -> BitMap -> IO ()
-updateSeen gs busy = forM_ (ours gs) $ \p -> writeArray busy p True
+-- seenPoint = isBitMap (peSeen . stPersist)
+
+updateSeen :: GameState Persist -> BitMap -> Double -> [Point] -> IO [Point]
+updateSeen gs seen vs ras = do
+    forM_ (ours gs) $ \p -> writeArray seen (pointToSeen p vs) True
+    filterM (\p -> not <$> readArray seen (pointToSeen p vs)) ras
+
+realToSeen :: Int -> Double -> Int
+realToSeen x v = ceiling $ fromIntegral x / v + 0.5 
+
+pointToSeen :: Point -> Double -> Point
+pointToSeen (x, y) v = (realToSeen x v, realToSeen y v)
 
 isBitMap :: (MyState -> BitMap) -> Point -> MyGame Bool
 isBitMap f p = do
@@ -724,8 +762,6 @@ canStay :: MyGame Bool -> MyGame Bool -> MyGame Bool
 canStay ifYes ifNo = do
     cs <- gets stCanStay
     if cs then ifYes else ifNo
-
-seenPoint = isBitMap (peSeen . stPersist)
 
 filterBusy :: (a -> Point) -> [a] -> MyGame [a]
 filterBusy f as = do
