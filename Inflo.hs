@@ -96,22 +96,23 @@ homeRadius   = (1*) . const  50	-- in which we consider to be at home
 homeRadius2  = (1*) . const 225	-- in which we consider to be at home
 razeRadius   =        const 1900	-- in which we consider to raze enemy hills
 dangerRadius = (1*) . attackradius2	-- in which we are in danger
-foodIMMax = 1000	-- maximum influence for food
+foodIMMax  = 1000	-- maximum influence for food
 enhiIMMax0 = 2000	-- influence for enemy hill: constant factor
-enhiIMMax1 =  10	-- influence for enemy hill: linear factor (* our ants)
-hotsIMMax =  500	-- maximum influence for hot spots
-enanIMMax =  800	-- maximum influence for enemy ants in home zone
-ouspIMMax =  900	-- maximum influence for our ants (negative influence)
-rndmIMMax = 1000	-- maximum influence for random spots
+enhiIMMax1 =   60	-- influence for enemy hill: linear factor (* our ants)
+enhiIMLimi =  120	-- influence for enemy hill: stronger attack when over this ants count
+hotsIMMax  =  500	-- maximum influence for hot spots
+enanIMMax  =  800	-- maximum influence for enemy ants in home zone
+ouspIMMax  =  900	-- maximum influence for our ants (negative influence)
+rndmIMMax  = 1000	-- maximum influence for random spots
 homeDefProc = 10	-- percent of our ants which should defend
 homeDefRate = 100	-- increase per missing ant for home defend
 timeIMDec = 20		-- time decay for food in percent (remaining)
 spaceIMDec = 90		-- space decay for all in percent (remaining)
 radNetDensity = 3	-- density of ants on the defence radius (ants / visibility)
 circIMMax = 100		-- maximum influence on the home circumference
-maxAttrsTries = 5	-- maximum tries to put new attractors
+maxAttrsTries = 9	-- maximum tries to put new attractors
 maxAttrsAtOnce = 1	-- maximum new random attractors per turn
-timeToLive    = 50	-- how many turns random attractors live
+timeToLive    = 40	-- how many turns random attractors live
 
 doTurn :: GameParams -> GameState Persist -> IO ([Order], GameState Persist)
 doTurn gp gs = do
@@ -164,7 +165,8 @@ doTurn gp gs = do
       -- collect all our homes with deficit in defence and the attacking enemy ants
       (hattrs, enants) = foldl collect ([], [])
                              $ map (homeDefenders gp upper (stOurCnt st1) (ours gs) as) hio
-      enhi = enhiIMMax0 + enhiIMMax1 * stOurCnt st0	-- when we have more ants, stronger attack
+      -- when we have more ants, stronger attack
+      enhi = enhiIMMax0 + enhiIMMax1 * max 0 (stOurCnt st0 - enhiIMLimi)
       attrs = [(foodP gs, foodIMMax),		-- food
                (enants, enanIMMax),		-- enemy ants near our home
                (hi, enhi),			-- enemy hills
@@ -332,9 +334,10 @@ perFightZone r0 r1 fz@(us, themm) maj = do
              busy <- mapArray id (stBusy st)
              forM_ us $ \p -> writeArray busy p False
              unsafeFreeze busy
+    r <- lift randomIO
     let u   = stUpper st
         -- here are the parameter of the evaluation
-        epar = fightParams st fz ho maj
+        epar = fightParams st fz ho maj r
         (sco, cfs) = nextTurn r0 r1 (valDirs ibusy u) epar us themm
         oac = fst cfs
     -- debug $ "Fight zone: us = " ++ show us ++ ", them = " ++ show themm
@@ -346,9 +349,9 @@ perFightZone r0 r1 fz@(us, themm) maj = do
 
 points tm = sum $ map length $ M.elems tm
 
-fightParams st fz@(us, themm) ho maj
+fightParams st fz@(us, themm) ho maj r
     = EvalPars { bnd = u, pes = pes', opt = 0, reg = reg',
-                 agr = agr', tgt = tgt', tgs = tgs' }
+                 agr = agr', tgt = tgt', tgs = tgs', rnd = r }
     where u   = stUpper st
           gp  = stPars st
           gs  = stState st

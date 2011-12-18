@@ -10,6 +10,7 @@ module Fight
       )
 where
 
+import Data.Bits ((.&.))
 import Data.List
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -25,8 +26,10 @@ mytrace _ x = x
 -- Some constants
 zoneMax      = 8  :: Int	-- max ants in a zone fight for full calculation
 zoneMaxMax   = 10 :: Int	-- max ants in a zone fight
-zoneMaxUs    = 3  :: Int	-- max of our ants in a bigger zone fight
+zoneMaxUs    = 4  :: Int	-- max of our ants in a bigger zone fight
 zoneMaxUsClc = 5  :: Int	-- max of our ants for which we do full calculation
+zoneMaxThClc = 5  :: Int	-- max of our ants for which we do full calculation
+considerMax  = 64
 
 data EDir = Any [EDir] | Stay | Go Dir deriving (Eq, Show)	-- extended direction, as we can also choose to wait
 type Action = (Point, EDir)		-- start point and direction to move
@@ -44,7 +47,8 @@ data EvalPars = EvalPars {
                     reg :: Int,		-- weight of enemy ants (100-reg=weight of ours)
                     agr :: Bool,	-- agressiv moves preferred
                     tgt :: Maybe Point,	-- target: we will move to this point
-                    tgs :: (Int, Int)	-- scores for target point (us, them), unit ants
+                    tgs :: (Int, Int),	-- scores for target point (us, them), unit ants
+                    rnd :: Int		-- a random for variation
                 } deriving Show
 
 -- This function calculates the best final configurations (and the moves
@@ -54,7 +58,7 @@ nextTurn dist dist1 gfun epar us toMove = mytrace ("our moves: " ++ show (cf:cfs
     where getMaxs !acc [] = acc
           getMaxs !acc@(!mx, cs) ((i, c) : cis)
               | i >  mx   = getMaxs (i, c) cis
-              -- | i == mx   = getMaxs (i, c) cis
+              | i == mx   = if rnd epar .&. 3 == 0 then getMaxs (i, c) cis else getMaxs acc cis
               | otherwise = getMaxs acc cis
           (cf:cfs) = ourMoves dist dist1 gfun epar us toMove
 
@@ -63,10 +67,13 @@ ourMoves :: Int -> Int -> GenFun -> EvalPars -> [Point] -> ToMove -> [(FPoint, C
 ourMoves dist dist1 gfun epar us toMove = do
     let amvs = sortBy (comparing (fst . snd)) $ map (interMove near' near1 gfun epar 0 toMove M.empty) us
         ourlen = length us
-        reduce = if ourlen > zoneMaxUsClc then 2 ^ (ourlen - zoneMaxUsClc) else 1
+        thelen = sum $ map length $ M.elems toMove
+        redexp = max 0 (ourlen - zoneMaxUsClc) + max 0 (thelen - zoneMaxThClc)
+        reduce = 2 ^ redexp
         mycfs = nextAnt True near' near1 gfun epar 0 amvs toMove ([], M.empty)
-        consider = length mycfs `div` reduce
-    myc <- take consider $ sortConfigs mycfs
+        consider = max 1 $ length mycfs `div` reduce
+    -- myc <- trace ("reduce: " ++ show reduce ++ ", consider: " ++ show consider)
+    myc <- take considerMax $ if rnd epar .&. 0xE == 0 then mycfs else sortConfigs mycfs
     let ocfs = nextPlayer near' near1 gfun epar toMove myc
         ooc  = gravCenter us
         oec  = gravCenter $ enemiesOfPlayer 0 toMove
